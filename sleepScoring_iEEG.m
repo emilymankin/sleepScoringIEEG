@@ -3,6 +3,19 @@ classdef sleepScoring_iEEG < handle
     %The class compares power of channel selected for sleep-scoring
     
     properties
+        subject;
+        experiment;
+        linkToMacroRawData;
+        macroFilePrefix = 'MACRO';
+        linkToConvertedData;
+        filenameRegionCorrespondence;
+        saveDir;
+        saveName;
+        startTime;
+        endTime;
+        preData;
+        postData;
+        sleepRange;
         
         deltaRangeMin = .5;
         deltaRangeMax = 4;
@@ -10,387 +23,761 @@ classdef sleepScoring_iEEG < handle
         spRangeMax = 15;
         
         flimits = [0 30]';
-        samplingRate = 1000;
+        samplingRate;
         sub_sampleRate = 200;
         
+        classificationMethod = 'mixture'; % can be 'threshold' or 'mixture'
+        % parameters for threshold method:
         REMprctile = 20;
-        NREMprctile = 55;
+        REMthresh;
+        NREMprctile = 50;
+        NREMthresh;
+        
         minDistBetweenEvents = 60; % sec
         
         PLOT_FIG = 1;
         scaling_factor_delta_log = 2*10^-4 ; % Additive Factor to be used when computing the Spectrogram on a log scale
-        useClustering_for_scoring = 0; % this should be used for naps w/o REM sleep
+        markerSize = 20;
         
         scoringEpochDuration = 30; % sec
         NREM_CODE = 1;
         REM_CODE = -1;
         
+        bestScoringChannels;
+        bestScoringChannelNames;
+        
+        spectralData;
+        sleepInds;
+        sleepScoreVectorByChannel;
+        sleepScoreVectorClusterByChannel;
+        manualResults;
+        regionsModifiedByHand;
+        finalSleepScoreVector;
+        
     end
     
     methods
         
-        function [sleep_score_vec] = evluateDelta(obj,data, LocalHeader, header)
+        function obj = prepSleepScoringObject(obj,subject,experiment,preExp,postExp)
+            if isempty(obj.subject)
+                obj.subject = subject;
+            end
+            if isempty(obj.experiment)
+                obj.experiment = experiment;
+            end
             
-            data(isnan(data)) = 0;
-
-            window = obj.scoringEpochDuration*obj.samplingRate;
-            [S,F,T,P]  = spectrogram(data,window,0,[0.5:0.2:obj.flimits(2)],obj.samplingRate,'yaxis');
-            diffSamples = obj.minDistBetweenEvents/diff(T(1:2)); %samples
-            
-            relevantIndices = find(F > obj.deltaRangeMin & F < obj.deltaRangeMax);
-            P_delta = movsum(sum(P(relevantIndices,:)),7);
-            
-            thSleepInclusion = prctile(P_delta,obj.NREMprctile);
-            thREMInclusion = prctile(P_delta,obj.REMprctile);
-            
-            %find points which pass the peak threshold 
-            
-            meanSleep = mean(P_delta);
-            stdSleep = std(P_delta);
-            detectionThresholdSD = 1.5;
-            
-            pointsPassedThresh = ((P_delta-meanSleep)/stdSleep > detectionThresholdSD);
-            pointsBelowThresh = ((P_delta-meanSleep)/stdSleep < detectionThresholdSD);
-            
-            pointsPassedSleepThresh = P_delta > thSleepInclusion;
-            pointsPassedREMThresh = P_delta < thREMInclusion;
-            
-            relevantSpIndices = find(F > obj.spRangeMin & F < obj.spRangeMax);
-            P_sp = movsum(sum(P(relevantSpIndices,:)),5);
-            
-             figure_name_out = sprintf('sleepScore_process_%s_E%d_%s',header.id,header.experimentNum, LocalHeader.origName);
-            figure('Name', figure_name_out,'NumberTitle','off');
-            set(gcf,'PaperUnits','centimeters','PaperPosition',[0.2 0.2 25 35]); % this size is the maximal to fit on an A4 paper when printing to PDF
-            set(gcf,'PaperOrientation','portrait');
-            set(gcf,'Units','centimeters','Position', get(gcf,'paperPosition')+[1 1 0 0]);
-            colormap('jet');
-            set(gcf,'DefaultAxesFontSize',14);
-            axes('position',[0.1,0.5,0.8,0.3])
-            
-            P2 = P/max(max(P));
-            P2 = (10*log10(abs(P2+obj.scaling_factor_delta_log)))';
-            P2 = [P2(:,2) P2 P2(:,end)];
-            ah1 = imagesc(T,F,P2',[-40,-5]);axis xy;
-            hold on
-            fitToWin1 = 30/max(P_delta);
-            fitToWin2 = 30/max(P_sp);
-            plot(T,P_delta*fitToWin1,'k-','linewidth',1)
-            plot(T,P_sp*fitToWin2-min(P_sp)*fitToWin2,'-','linewidth',1,'color',[0.8,0.8,0.8])
-            line(get(gca,'xlim'),thSleepInclusion*fitToWin1*ones(1,2),'color','k','linewidth',3)
-            line(get(gca,'xlim'),thREMInclusion*fitToWin1*ones(1,2),'color','k','linewidth',3)
-            
-            xlabel('ms')
-            ylabel('F(Hz)')
-            XLIM = get(gca,'xlim');
-            YLIM = get(gca,'xlim');
-            text(XLIM(2)+diff(XLIM)/35,thSleepInclusion*fitToWin1,'NREM TH')
-            text(XLIM(2)+diff(XLIM)/35,thREMInclusion*fitToWin1,'REM TH')
-            
-            %% Compare threshold-based sleep-scoring to a data-driven cluster approach
-            D1 = [P_delta(:), P_sp(:)];            
-            gm = fitgmdist(D1,2);
-            P = posterior(gm,D1);
-            C1 = find(P(:,1)>P(:,2));
-            C2 = find(P(:,2)>P(:,1));            
-            Svec = zeros(1,length(D1));
-            if gm.mu(1) > gm.mu(2)
-                Svec(C1) = 1;
+            if ischar(obj.experiment)
+                % passed in a directory, not something from the database.
+                % Must handle somewhat differently:
+                % Assuming for the moment that this won't ask for pre and
+                % post data. Can change that if you decide you want it;
+                % model on the code in the else block.
+                obj.linkToConvertedData = obj.experiment;
+                obj.linkToMacroRawData = obj.experiment;
+                doPre = 0; doPost = 0;
             else
-                Svec(C2) = 1;
-            end
-            
-            hold on
-            plot(T(pointsPassedSleepThresh),25,'.','markersize',5,'color','w')
-            plot(T(logical(Svec)),20,'.','markersize',5,'color','r')
-            legend('P delta','P spindle','TH1','TH2')
-            title(sprintf('white - sleep scoring based on delta TH, red - based on clustering delta+spindle, diff = %2.2f%%',...
-                100*sum(pointsPassedSleepThresh - Svec)/length(Svec)))
-            
-                
-            for ii_a = 1:2
-                if ii_a == 1
-                    if ~obj.useClustering_for_scoring
-                        data_merge = pointsPassedSleepThresh;
-                    else
-                        data_merge = Svec;
-                    end
-                    
-                elseif ii_a == 2
-                    if ~obj.useClustering_for_scoring
-                        data_merge = pointsPassedREMThresh;
-                    else
-                        data_merge = ~Svec;
-                    end
-
-                end
-                diffStartEnd = diff(data_merge);
-                %events are defined by sequences which have a peak above
-                %detectionThresholdSD and a duration within the limits of
-                %required duration. The duration is considered to be from the
-                %first point above pointsPassedThreshStartEnd until the last
-                %point above it
-                nextInd = find(data_merge,1);
-                EventsMinLimit = []; currDuration = [];
-                EventsMaxLimit = []; eventTimes = [];
-                while ~isempty(nextInd)
-                    %last pass above the start threshold before current event
-                    startCurrEvent = find(diffStartEnd(1:nextInd)==1, 1, 'last')+1;
-                    if nextInd == 1
-                        startCurrEvent = 1;
-                    end
-                    %last pass above the end threshold after current event
-                    endCurrEvent = find(diffStartEnd(nextInd:end)==-1,1,'first')+nextInd-1;
-                    if ~isempty(startCurrEvent) && ~isempty(endCurrEvent)
-                        %calcualte the duration
-                        currDuration = [currDuration (endCurrEvent-startCurrEvent)/obj.samplingRate];
-                    else
-                        currDuration = [currDuration nan];
-                    end
-                    
-                    %if the duration is within required limits, add to event
-                    %list
-                    EventsMinLimit = [EventsMinLimit; startCurrEvent];
-                    
-                    if isempty(endCurrEvent)
-                        EventsMaxLimit = [EventsMaxLimit; endCurrEvent];
-                        
-                    else
-                        EventsMaxLimit = [EventsMaxLimit; endCurrEvent];
-                    end
-                    nextInd = find(data_merge(endCurrEvent+1:end),1,'first')+endCurrEvent;
-                    if (nextInd>=length(diffStartEnd)); nextInd = []; end
-                end
-                if ~sum(data_merge(EventsMinLimit(end):end) == 0)
-                    EventsMaxLimit = [EventsMaxLimit; length(data_merge)];
-                end
-
-                % if there's <minute between REM/NREM points - merge them (this is
-                % inline with AASM guidlines)
-                %merge events which are too close apart, and set the event
-                %timing to be the middle of the event
-                eventDiffs = EventsMinLimit(2:end)-EventsMaxLimit(1:end-1);
-                %find only events for which enough far apart
-                short_intervals = find(eventDiffs'<=(diffSamples));
-                
-                if ~isempty(short_intervals)
-                    for iii = 1:length(short_intervals)
-                        index = short_intervals(iii);
-                        data_merge(EventsMaxLimit(index):EventsMinLimit(index+1)) = 1;
-                    end
-                end
+                info = getExperimentInfo(obj.subject,obj.experiment); % there was a third argument (1) but I don't know why...
+                if ~isfield(info,'linkToConvertedData'),info.linkToConvertedData = info.rawUnpacked;end
+                obj.linkToConvertedData = info.linkToConvertedData;
                 
                 
-                
-                % Remove standalone detections which were not merged before
-                diffStartEnd = diff(data_merge);
-                %events are defined by sequences which have a peak above
-                %detectionThresholdSD and a duration within the limits of
-                %required duration. The duration is considered to be from the
-                %first point above pointsPassedThreshStartEnd until the last
-                %point above it
-                nextInd = find(data_merge,1);
-                EventsMinLimit = [];
-                EventsMaxLimit = [];
-                while ~isempty(nextInd)
-                    %last pass above the start threshold before current spindle
-                    startCurrEvent = find(diffStartEnd(1:nextInd)==1, 1, 'last')+1;
-                    %last pass above the end threshold after current spindle
-                    endCurrEvent = find(diffStartEnd(nextInd:end)==-1,1,'first')+nextInd-1;
-                    
-                    % remove single points
-                    if endCurrEvent-startCurrEvent < 3
-                        disp(sprintf('removing ind %d',nextInd))
-                        data_merge(nextInd:nextInd+2) = 0;
-                    end
-                    nextInd = find(pointsPassedSleepThresh(endCurrEvent+1:end),1,'first')+endCurrEvent;
-                    
-                    % deal with last indice:
-                    if nextInd > length(diffStartEnd)
-                        disp(sprintf('removing ind %d',nextInd))
-                        data_merge(nextInd) = 0;
-                        nextInd = [];
-                    end
-                    
-                end
-                
-                if ii_a == 1
-                    pointsPassedSleepThresh = data_merge;
-                elseif ii_a == 2
-                    pointsPassedREMThresh = data_merge;
-                end
-                
-            end
-            
-  
-            sleep_score_vec = zeros(1,length(data));
-            
-            sleep_score_vec(1:T(1)*obj.samplingRate) = pointsPassedSleepThresh(1);
-            
-            for iEpoch = 2:length(T)
-                if(pointsPassedSleepThresh(iEpoch))
-                    sleep_score_vec(T(iEpoch-1)*obj.samplingRate+1:T(iEpoch)*obj.samplingRate) = obj.NREM_CODE;
-                elseif pointsPassedREMThresh(iEpoch)
-                    sleep_score_vec(T(iEpoch-1)*obj.samplingRate+1:T(iEpoch)*obj.samplingRate) = obj.REM_CODE;
-                end
-            end
-            
-            save(sprintf('sleepScore_%s_%d_%s',header.id,header.experimentNum,LocalHeader.origName),...
-                'T','F','P2','header','sleep_score_vec','obj','P_delta','pointsPassedSleepThresh','pointsPassedREMThresh')
-            
-            if obj.PLOT_FIG
-                
-                [~, hostname]= system('hostname');
-                if strfind(hostname, 'cns-cdkngw2')
-                    figure_folder = 'E:\Data_p\ClosedLoopDataset\sleepScoring';
+                % add links to pre and post experiments if given
+                if isempty(obj.preData) && exist('preExp','var') && ~isempty(preExp)
+                    doPre = 1;
+                    infoPre = getExperimentInfo(obj.subject,preExp);% there was a third argument (1) but I don't know why...
+                    if ~isfield(infoPre,'linkToConvertedData'),infoPre.linkToConvertedData = infoPre.rawUnpacked;end
+                    obj.preData.linkToConverted = infoPre.linkToConvertedData;
+                    obj.preData.linkToMacroRawData = [];
+                    obj.preData.startTime = [];
+                    obj.preData.endTime = [];
                 else
-                    error('host not identified')
+                    doPre = ~isempty(obj.preData);
+                end
+                if isempty(obj.postData) && exist('postExp','var') && ~isempty(postExp)
+                    doPost = 1;
+                    infoPost = getExperimentInfo(obj.subject,postExp);% there was a third argument (1) but I don't know why...
+                    if ~isfield(infoPost,'linkToConvertedData'),infoPost.linkToConvertedData = infoPost.rawUnpacked;end
+                    obj.postData.linkToConverted = infoPost.linkToConvertedData;
+                    obj.preData.linkToMacroRawData = [];
+                    obj.postData.startTime = [];
+                    obj.postData.endTime = [];
+                else
+                    doPost = ~isempty(obj.postData);
+                end
+            end
+            
+            obj.saveDir = fullfile(obj.linkToConvertedData,'sleepScoring');
+            obj.saveName = ['sleepScoringObj_',datestr(now,'yyyy_mm_dd-HH_MM')];
+            
+            % find start and end times if possible:
+            if isempty(obj.linkToMacroRawData)
+                switch info.recordingSystem
+                    case 'BlackRock'
+                        whatToDo = questdlg('Micros were recorded on BR. Are there Nlx Macro Files to use?',...
+                            'Use Nlx Macros?','yes','no','yes');
+                        if strcmp(whatToDo,'no')
+                            obj.linkToMacroRawData = strrep(info.linkToRaw,'ns5','ns3');
+                            [obj.startTime, obj.endTime] = BR_getStartAndEndTimes(info.linkToRaw);
+                            obj.macroFilePrefix = 'MACROBR';
+                            if doPre
+                                obj.preData.linkToMacroRawData = strrep(infoPre.linkToRaw,'ns5','ns3');
+                                [obj.preData.startTime, obj.preData.endTime] = BR_getStartAndEndTimes(infoPre.linkToRaw);
+                            end
+                            if doPost
+                                obj.postData.linkToMacroRawData = strrep(infoPost.linkToRaw,'ns5','ns3');
+                                [obj.postData.startTime, obj.postData.endTime] = BR_getStartAndEndTimes(infoPost.linkToRaw);
+                            end
+                        else
+                            fprintf('\nPlease find an Nlx raw data file for experiment %d\n', experiment);
+                            [filename, pathname] = uigetfile('*.ncs',sprintf('Please find an Nlx raw data file for experiment %d', experiment));
+                            obj.linkToMacroRawData = pathname;
+                            [obj.startTime, obj.endTime] = Nlx_getStartAndEndTimes(fullfile(pathname,filename));
+                            if doPre
+                                fprintf('\nPlease find an Nlx raw data file for experiment %d\n', preExp);
+                                [filename, pathname] = uigetfile('*.ncs',sprintf('Please find an Nlx raw data file for experiment %d', preExp));
+                                obj.preData.linkToMacroRawData = pathname;
+                                [obj.preData.startTime, obj.preData.endTime] = Nlx_getStartAndEndTimes(fullfile(pathname,filename));
+                            end
+                            if doPost
+                                fprintf('\nPlease find an Nlx raw data file for experiment %d\n', postExp);
+                                [filename, pathname] = uigetfile('*.ncs',sprintf('Please find an Nlx raw data file for experiment %d', postExp));
+                                obj.postData.linkToMacroRawData = pathname;
+                                [obj.postData.startTime, obj.postData.endTime] = Nlx_getStartAndEndTimes(fullfile(pathname,filename));
+                            end
+                        end
+                        
+                    case 'Neuralynx'
+                        files = dir(fullfile(info.linkToRaw,'L*.ncs'));
+                        if isempty(files)
+                            files = dir(fullfile(info.linkToRaw,'R*.ncs'));
+                        end
+                        filename = files(1).name;
+                        obj.linkToMacroRawData = info.linkToRaw;
+                        [obj.startTime, obj.endTime] = Nlx_getStartAndEndTimes(fullfile(info.linkToRaw,filename));
+                        if doPre
+                            files = dir(fullfile(infoPre.linkToRaw,'L*.ncs'));
+                            if isempty(files)
+                                files = dir(fullfile(infoPre.linkToRaw,'R*.ncs'));
+                            end
+                            filename = files(1).name;
+                            obj.preData.linkToMacroRawData = infoPre.linkToRaw;
+                            [obj.preData.startTime, obj.preData.endTime] = Nlx_getStartAndEndTimes(fullfile(infoPre.linkToRaw,filename));
+                        end
+                        if doPost
+                            files = dir(fullfile(infoPost.linkToRaw,'L*.ncs'));
+                            if isempty(files)
+                                files = dir(fullfile(infoPost.linkToRaw,'R*.ncs'));
+                            end
+                            filename = files(1).name;
+                            obj.postData.linkToMacroRawData = infoPost.linkToRaw;
+                            [obj.postData.startTime, obj.postData.endTime] = Nlx_getStartAndEndTimes(fullfile(infoPost.linkToRaw,filename));
+                        end
+                end
+            elseif isempty(obj.startTime)
+                if exist(obj.linkToMacroRawData,'dir')
+                    % this is a Nlx dir
+                    files = dir(fullfile(obj.linkToMacroRawData,'L*.ncs'));
+                    if isempty(files)
+                        files = dir(fullfile(obj.linkToMacroRawData,'R*.ncs'));
+                    end
+                    filename = files(1).name;
+                    [obj.startTime, obj.endTime] = Nlx_getStartAndEndTimes(fullfile(obj.linkToMacroRawData,filename));
+                    obj.macroFilePrefix = 'MACRO';
+                    obj = unpackMacrosWithPrePost(obj,doPre,doPost);
+                elseif exist(obj.linkToMacroRawData,'file')
+                    % this is a BR file
+                    [obj.startTime, obj.endTime] = BR_getStartAndEndTimes(obj.linkToMacroRawData);
+                    obj.macroFilePrefix = 'MACROBR';
                 end
                 
-                figure_name_out = sprintf('sleepScore_%s_E%d_%s',header.id,header.experimentNum,LocalHeader.origName);
+            end
+                        
+            
+            
+            oneFilename = dir(fullfile(obj.linkToConvertedData,[obj.macroFilePrefix,'*']));
+            data = load(fullfile(obj.linkToConvertedData,oneFilename(1).name),'samplingInterval');
+            sampInt = data.samplingInterval;
+            sampRate = 1/sampInt; % Stored in kHz
+            obj.samplingRate = sampRate * 1000;
+            
+            if isempty(obj.endTime)
+                temp = whos('-file',fullfile(obj.linkToConvertedData,macroFiles(1).name));
+                dataInfo = temp(ismember({temp.name},'data'));
+                nSamples = prod(dataInfo.size);
+                sessionDurationSeconds = nSamples/obj.samplingRate;
+                dateFormat = 'yyyy/mm/dd HH:MM:SS';
+                obj.endTime = datestr(datenum(obj.startTime,dateFormat)+sessionDurationSeconds/24/60/60,dateFormat);
+            end
+            obj.saveSelf;
+        end
+        
+        function obj = unpackMacrosWithPrePost(obj,doPre,doPost)
+            % First figure out whether macros have been upnacked in the
+            % main folder, and what filenames were used
+%             macroRawFiles = dir(fullfile(obj.linkToMacroRawData,'*.ncs'));
+%             macroRawFiles = {macroRawFiles.name};
+%             notReallyMacro = cellfun(@(x)~strcmp(x(1),'L') && ~strcmp(x(1),'R'),macroRawFiles);
+%             macroRawFiles(notReallyMacro) = [];
+%             macroRawFiles = cellfun(@(x)regexprep(x,'\_\d{4}',''),macroRawFiles,'uniformoutput',0);
+            
+            thisExp = getExperimentInfo(obj.subject,obj.experiment);
+            brainRegions = thisExp.montagePos;
+brainRegions(cellfun(@(x)isempty(x),brainRegions)) = [];
+macroRawFiles = cellfun(@(x)[arrayfun(@(y)sprintf('%s%d.ncs',x,y),1:8,'uniformoutput',0)],brainRegions,'uniformoutput',0);
+macroRawFiles = cat(2,macroRawFiles{:});
+
+            fullNames = arrayfun(@(x)sprintf('%s%d_%s.mat',obj.macroFilePrefix,x,...
+                regexp(macroRawFiles{x},'[A-Z]*\d','match','once')),1:length(macroRawFiles),'uniformoutput',0);
+            simpleNames = arrayfun(@(x)sprintf('%s%d.mat',obj.macroFilePrefix,x),1:length(macroRawFiles),'uniformoutput',0);
+            alreadyExists = logical(cellfun(@(x)exist(fullfile(obj.linkToConvertedData,x),'file'),fullNames));
+            alreadyExists_simple = logical(cellfun(@(x)exist(fullfile(obj.linkToConvertedData,x),'file'),simpleNames));
+            if sum(alreadyExists_simple)>sum(alreadyExists)
+                fileNames = simpleNames;
+            else
+                fileNames = fullNames;
+            end
+            obj.filenameRegionCorrespondence = [fileNames;fullNames];
+            
+            % Now unpack macros in each location
+            obj = unpackMacros(obj, obj.linkToConvertedData,obj.linkToMacroRawData,fileNames,macroRawFiles);
+            if doPre
+                obj = unpackMacros(obj, obj.preData.linkToConverted,obj.preData.linkToMacroRawData,fileNames,macroRawFiles);
+            end
+            if doPost
+                obj = unpackMacros(obj, obj.postData.linkToConverted,obj.postData.linkToMacroRawData,fileNames,macroRawFiles);
+            end
+        end
+        
+        function obj = unpackMacros(obj, linkToConvertedData,linkToMacroRawData,fileNames,rawFileNames);
+            alreadyConverted = logical(cellfun(@(x)exist(fullfile(linkToConvertedData,x),'file'),fileNames));
+            fileNames(alreadyConverted) = [];
+            rawFileNames(alreadyConverted) = [];
+            
+            if ~isempty(fileNames)
+            needsTS = ~exist(fullfile(linkToConvertedData,'lfpTimeStampsMACRO.mat'),'file');
+            macroRawFiles = dir(fullfile(linkToMacroRawData,'*.ncs'));
+            macroRawFiles = {macroRawFiles.name};
+            suffix = regexp(macroRawFiles{1},'\_\d{4}\.ncs','match','once');
+            if ~isempty(suffix)
+                macroRawFiles = cellfun(@(x)strrep(x,'.ncs',suffix),rawFileNames,'uniformoutput',0);
+            else
+                macroRawFiles = rawFileNames;
+            end
+            rawExists = logical(cellfun(@(x)exist(fullfile(linkToMacroRawData,x),'file'),macroRawFiles));
+            macroRawFiles = macroRawFiles(rawExists);
+            fileNames = fileNames(rawExists);
+            if ~isempty(macroRawFiles)
+            [time0,timeend] = unpackAMacro(obj,1,needsTS,fileNames,macroRawFiles,linkToMacroRawData,linkToConvertedData);
+           for f = 2:length(fileNames)
+                unpackAMacro(obj,f,0,fileNames,macroRawFiles,linkToMacroRawData,linkToConvertedData,time0,timeend);
+            end
+            end
+            end
+            %             end
+        end
+        
+        
+        function obj = chooseScoringChannels(obj,skipPlotting);
+            if ~exist('skipPlotting','var') || isempty(skipPlotting)
+                skipPlotting = exist(fullfile(obj.saveDir,'Per Channel Hypnograms'),'dir');
+            end
+            if ~skipPlotting
+                regions = plotHypnogramsPerChannel(obj,1);
+            else
+                macroFiles = dir(fullfile(obj.linkToConvertedData,[obj.macroFilePrefix,'*']));
+                macroChannelNums = arrayfun(@(x)str2double(regexp(x.name,'\d*','once','match')),macroFiles);
+                [macroChannelNums,ind] = sort(macroChannelNums);
+                macroFiles = macroFiles(ind);
+                ind = macroChannelNums>128;
+                macroChannelNums(ind) = []; macroFiles(ind) = [];
+                
+                info = getExperimentInfo(obj.subject,obj.experiment);
+                allChannels = cellfun(@(x)repmat({x},1,8),info.montagePos,'uniformoutput',0);
+                allChannels = cat(2,allChannels{:});
+                regions = allChannels;%(macroChannelNums);
+            end
+            channelsToUse = inputdlg('Which channel(s) should be used for sleep scoring? (If more than one, please enter inside brackets)',...
+                'ChannelSelection');
+            obj.bestScoringChannels = eval(channelsToUse{1});
+            if ~isempty(obj.filenameRegionCorrespondence)
+                bestScoringChannelNames = obj.filenameRegionCorrespondence(2,obj.bestScoringChannels);
+                obj.bestScoringChannelNames = cellfun(@(x)regexp(x,'(?<=\_)[A-Z]*\d*','match','once'),bestScoringChannelNames,'uniformoutput',0);
+            elseif exist('regions','var')
+                
+                obj.bestScoringChannelNames = regions(obj.bestScoringChannels);
+            else
+                obj.bestScoringChannelNames = arrayfun(@(x)sprintf('Channel %d',x),obj.bestScoringChannels,'uniformoutput',0);
+            end
+            obj.saveSelf;
+        end
+        
+        function obj = evaluateDelta(obj)
+            channels = obj.bestScoringChannels;
+            obj.REMthresh = zeros(1,length(channels));
+            obj.NREMthresh = zeros(1,length(channels));
+            
+            for c = 1:length(channels)
+                ch = channels(c);
+                needToDoThisChannel = isempty(obj.spectralData) || length(obj.spectralData)<c ||  obj.spectralData(c).channel ~= ch;
+                if needToDoThisChannel
+                    d = dir(fullfile(obj.linkToConvertedData,sprintf('%s%d*',obj.macroFilePrefix,ch)));
+                    filename = {fullfile(obj.linkToConvertedData,d(1).name)};
+                    sleepSess = 1;
+                    if ~isempty(obj.preData)
+                        d = dir(fullfile(obj.preData.linkToConverted,sprintf('%s%d*',obj.macroFilePrefix,ch)));
+                        thisFile = fullfile(obj.preData.linkToConverted,d(1).name);
+                        filename = [{thisFile},filename];
+                        sleepSess = 2;
+                    end
+                    if ~isempty(obj.postData)
+                        d = dir(fullfile(obj.postData.linkToConverted,sprintf('%s%d*',obj.macroFilePrefix,ch)));
+                        thisFile = fullfile(obj.postData.linkToConverted,d(1).name);
+                        filename = [filename,{thisFile}];
+                    end
+                    
+                for fil = 1:length(filename)
+                    temp = load(filename{fil},'data');
+                    if fil==1
+                        data = double(temp.data);
+                        sess = ones(size(temp.data));
+                    else
+                        data = [data,double(temp.data)];
+                        sess = [sess,fil*ones(size(temp.data))];
+                    end
+                end
+                data(isnan(data)) = 0;
+                
+                
+                
+                % compute spectrogram
+                window = obj.scoringEpochDuration*obj.samplingRate;
+                [S,F,T,P]  = spectrogram(data,window,0,0.5:0.2:obj.flimits(2),obj.samplingRate,'yaxis');
+                startSleepInd = find(sess==sleepSess,1,'first');
+                endSleepInd = find(sess==sleepSess,1,'last');
+                startSleepIndShort = max(round(startSleepInd/length(sess)*size(P,2)),1);
+                endSleepIndShort = min(size(P,2),round(endSleepInd/length(sess)*size(P,2)));
+                obj.sleepRange = [startSleepInd endSleepInd; startSleepIndShort endSleepIndShort];
+                %                 [Ssl,Fsl,Tsl,Psl]  = spectrogram(data(sess==sleepSess),window,0,0.5:0.2:obj.flimits(2),obj.samplingRate,'yaxis');
+                
+                
+                %                 crr = xcorr2(P,Psl);
+                %                 M = max(max(crr));
+                %                 test = crr == M;
+                %                 ind = find(sum(test))
+                
+                
+                P2 = P/max(max(P));
+                P2 = (10*log10(abs(P2+obj.scaling_factor_delta_log)))';
+                P2 = [P2(:,2) P2 P2(:,end)];
+                
+                diffSamples = obj.minDistBetweenEvents/diff(T(1:2)); %samples
+                
+                % Find delta Power
+                relevantIndices = F > obj.deltaRangeMin & F < obj.deltaRangeMax;
+                P_delta = Smooth(sum(P(relevantIndices,:)),7);
+                
+                % Define threholds for SWS and REM
+                thSleepInclusion = prctile(P_delta,obj.NREMprctile);
+                thREMInclusion = prctile(P_delta,obj.REMprctile);
+                obj.REMthresh(c) = thREMInclusion;
+                obj.NREMthresh(c) = thSleepInclusion;
+                
+                %find points which pass the peak threshold
+                pointsPassedSleepThresh = P_delta > thSleepInclusion;
+                pointsPassedREMThresh = P_delta < thREMInclusion;
+                
+                % Find Spindle Power
+                relevantSpIndices = F > obj.spRangeMin & F < obj.spRangeMax;
+                P_sp = Smooth(sum(P(relevantSpIndices,:)),5);
+                
+                % Prep Figure
+                figure_name_out = sprintf('sleepScore_process_Channel%d',ch);
                 figure('Name', figure_name_out,'NumberTitle','off');
-                set(gcf,'PaperUnits','centimeters','PaperPosition',[0.2 0.2 21 30]); % this size is the maximal to fit on an A4 paper when printing to PDF
+                set(gcf,'PaperUnits','centimeters','PaperPosition',[0.2 0.2 25 35]); % this size is the maximal to fit on an A4 paper when printing to PDF
                 set(gcf,'PaperOrientation','portrait');
                 set(gcf,'Units','centimeters','Position', get(gcf,'paperPosition')+[1 1 0 0]);
                 colormap('jet');
                 set(gcf,'DefaultAxesFontSize',14);
-                axes('position',[0.1,0.65,0.8,0.3])
-                msz = 10; % marker size
-                [S2,F2,T2,P2]  = spectrogram(data,window,0.8*window,[0.5:0.2:obj.flimits(2)],obj.samplingRate,'yaxis');
+                axes('position',[0.1,0.5,0.8,0.3])
                 
-                P2 = P2/max(max(P2));
-                P1 = (10*log10(abs(P2+obj.scaling_factor_delta_log)))';
-                P1 = [P1(:,1) P1 P1(:,end)];
-                T2 = [0 T2 T2(end)+1];
-                Pplot = imgaussfilt(P1',3);
+                % Plot Spectrogram. Delta Power, Spindle Power, and Thresholds
+                ah1 = imagesc(T,F,P2',[-40,-5]);axis xy;
+                hold on
+                fitToWin1 = 30/max(P_delta);
+                fitToWin2 = 30/max(P_sp);
+                plot(T,P_delta*fitToWin1,'k-','linewidth',1)
+                plot(T,P_sp*fitToWin2-min(P_sp)*fitToWin2,'-','linewidth',1,'color',[0.8,0.8,0.8])
+                line(get(gca,'xlim'),thSleepInclusion*fitToWin1*ones(1,2),'color','k','linewidth',3)
+                line(get(gca,'xlim'),thREMInclusion*fitToWin1*ones(1,2),'color','k','linewidth',3)
+                legend('P delta','P spindle','TH1','TH2')
                 
-                try
-                    start_time = datenum(LocalHeader.NLXfilesStartTime{1});
-                    if length(LocalHeader.NLXfilesStartTime) > 1
-                        if datenum(LocalHeader.NLXfilesStartTime{2}) < datenum(LocalHeader.NLXfilesStartTime{1})
-                            % Many times NLX numbering is reversed
-                            start_time = datenum(LocalHeader.NLXfilesStartTime{2});
-                        end
-                    end
-                    end_time = datenum(LocalHeader.NLXfilesEndTime{end});
-                catch
-                    start_time = datenum('2017/10/21 00:00:00');
-                    hh = round(diff([T(1), T(end)])/(60*60));
-                    if hh >= 1
-                        mm = round(diff([T(1), T(end)])/60 - hh*60);
-                    else
-                        hh = 0;
-                        mm = round(diff([T(1), T(end)])/60)
-                    end
-                    end_time = datenum(sprintf('2017/10/21 %02d:%02d:00',hh,mm));
+                xlabel('ms')
+                ylabel('F(Hz)')
+                XLIM = get(gca,'xlim');
+                YLIM = get(gca,'xlim');
+                text(XLIM(2)+diff(XLIM)/35,thSleepInclusion*fitToWin1,'NREM TH')
+                text(XLIM(2)+diff(XLIM)/35,thREMInclusion*fitToWin1,'REM TH')
+                
+                %% Compare threshold-based sleep-scoring to a data-driven cluster approach
+                
+                if c == 1 || ~exist('Svec','var')
+                    Svec = zeros(length(channels),length(P_delta));
                 end
+                D1 = [P_delta(:), P_sp(:)];
+                gm = fitgmdist(D1,2);
+                P = posterior(gm,D1);
+                C1 = P(:,1)>P(:,2);
+                C2 = P(:,2)>P(:,1);
                 
-                xData = linspace(start_time,end_time,length(P1));
-                
-                
-                ah = imagesc(xData,F2,P1',[-40,-5]);axis xy;
-                
-                % ah = imagesc(xData,F,Pplot,[-40,-5]);axis xy;
-                axis([get(gca,'xlim'),[0.5,20]])
-                set(gca,'ytick',[0.5,10,20])
-                datetick('x','HH:MM PM','keeplimits')
-                
-                %                 xlimits = [0 T2(end)];
-                %                 xticks = 1:(60*60):T2(end);
-                %                 for ii = 1:length(xticks)
-                %                     xlabel_str{ii} = num2str(floor((xticks(ii)/(60*60))));
-                %                 end
-                %                 axis([xlimits obj.flimits'])
-                %                 set(gca,'xtick',xticks,'XTickLabel',xlabel_str)
-                %
-                yticks = obj.flimits(1):5:obj.flimits(2);
-                colorbar
-                title_str = sprintf('%s, E%d, sleep scoring - NREM (red), Wake/REM (black)',header.id,header.experimentNum);
-                axis([get(gca,'xlim'),[0.5,30]])
-                set(gca,'ytick',[0.5,10,20,30])
-                YLIM = get(gca,'ylim');
-                
+                if gm.mu(1) > gm.mu(2)
+                    Svec(c,C1) = 1;
+                else
+                    Svec(c,C2) = 1;
+                end
                 
                 hold on
-                xData2 = linspace(start_time,end_time,length(T));
-                plot(xData2(logical(pointsPassedSleepThresh)),20,'.r','markersize',msz)
-                plot(xData2(logical(pointsPassedREMThresh)),18,'.k','markersize',msz)
+                plot(T(pointsPassedSleepThresh),25,'.','markersize',8,'color','w')
+                plot(T(logical(Svec(c,:))),20,'.','markersize',8,'color','r')
                 
-                xlabel('t (hh:mm)')
-                ylabel('f (Hz)')
-                title(title_str)
+                plot(T(obj.sleepRange(2,1))*[1 1],F([1 end]),'color',.75*[1 1 1],'linewidth',4)
+                plot(T(obj.sleepRange(2,2))*[1 1],F([1 end]),'color',.75*[1 1 1],'linewidth',4)
+                plot(T(obj.sleepRange(2,1))*[1 1],F([1 end]),'y','linewidth',2)
+                plot(T(obj.sleepRange(2,2))*[1 1],F([1 end]),'y','linewidth',2)
                 
-                axes('position',[0.1,0.2,0.3,0.3])
-                sleepRange = zeros(1,length(sleep_score_vec));
-                startInd = find(sleep_score_vec == obj.NREM_CODE,1,'first');
-                endInd = find(sleep_score_vec == obj.NREM_CODE,1,'last');
-                sleepRange(startInd:endInd) = 1;
                 
-                SLEEP_properties_IDX.NREM = 1;
-                SLEEP_properties_IDX.REM = 2;
-                SLEEP_properties_IDX.WAKE = 3;
+                legend('P delta','P spindle','TH1','TH2','Clustering Results','Thresh Results')
+                title(sprintf('white - based on delta TH, red - based on  delta+spindle clust, diff = %2.2f%%',...
+                    sum(pointsPassedSleepThresh - Svec(c,:)')/length(Svec)))
                 
+                export_fig(gcf,fullfile(obj.saveDir,[figure_name_out,'.pdf']))
+                
+                %% Create sleepScoreVector, which indicates which data points are SWS and REM
+                if c == 1
+                    sleepScoreVectorByChannel = zeros(length(channels),length(data));
+                    sleepScoreVectorClusterByChannel = sleepScoreVectorByChannel;
+                end
+                
+                % One pass for SWS, one pass for REM, one pass for
+                % SWS with cluster method
                 for ii_a = 1:3
-                    if ii_a == 1
-                        a_data =  data(sleep_score_vec == obj.NREM_CODE);
-                    elseif ii_a == 2
-                        a_data =  data(sleep_score_vec == obj.REM_CODE);
-                    elseif ii_a == 3
-                        a_data =  data(~sleepRange);
+                    switch ii_a
+                        case 1
+                            data_merge = pointsPassedSleepThresh;
+                        case 2
+                            data_merge = pointsPassedREMThresh;
+                        case 3
+                            data_merge = Svec(c,:);
                     end
                     
-                    a_data = a_data - mean(a_data);
-                    freq = 0:obj.samplingRate/2;
-                    WIN = min(500,length(a_data));
-                    NOVERLAP = min(400,WIN/2);
-                    [pxx1, f1] = pwelch(a_data,WIN,NOVERLAP,freq,obj.samplingRate);
-                    SLEEP_properties{ii_a}.pxx1 = pxx1;
-                    SLEEP_properties{ii_a}.pxx1 = f1;
+                    % Find events
+                    events = continuousRunsOfTrue(data_merge');
+                    EventsMinLimit = events(:,1);
+                    EventsMaxLimit = events(:,2);
+                    currDuration = (EventsMaxLimit-EventsMinLimit)/obj.samplingRate;
                     
-                    hold on
+                    % if there's less than a minute between REM/NREM points, merge them (this is
+                    % inline with AASM guidlines)
+                    
+                    eventDiffs = EventsMinLimit(2:end)-EventsMaxLimit(1:end-1);
+                    short_intervals = find(eventDiffs'<=(diffSamples));
+                    
+                    % Set the value of the intervening intervals to 1
+                    for iii = 1:length(short_intervals)
+                        index = short_intervals(iii);
+                        data_merge(EventsMaxLimit(index):EventsMinLimit(index+1)) = 1;
+                    end
+                    
+                    
+                    
+                    % Find events again and remove standalone detections
+                    events = continuousRunsOfTrue(data_merge');
+                    eventSamples = events(:,2)-events(:,1);
+                    eventsToRemove = events(eventSamples<3,:);
+                    for i = 1:size(eventsToRemove,1)
+                        data_merge(eventsToRemove(i,1):eventsToRemove(i,2)) = 0;
+                    end
+                    
+                    
                     if ii_a == 1
-                        plot(f1,10*log10(pxx1),'b')
-                        hold on
+                        pointsPassedSleepThresh = data_merge;
                     elseif ii_a == 2
-                        plot(f1,10*log10(pxx1),'g')
+                        pointsPassedREMThresh = data_merge;
                     elseif ii_a == 3
-                        plot(f1,10*log10(pxx1),'color',[0.8 0.8 0.8])
+                        SWSbyCluster = data_merge;
                     end
                     
                 end
                 
-                axis([0 25,0,inf])
-                xlabel('f(Hz)')
-                ylabel('dB')
-                legend('NREM','REM*','Wake*')
-                title('power spectrum (iEEG)')
+                % Extrapolate the 30-second epochs to the size of the fully sampled
+                % data file:
+                
+                sleepScoreVectorByChannel(c,1:T(1)*obj.samplingRate) = pointsPassedSleepThresh(1)*obj.REM_CODE + pointsPassedREMThresh(1)*obj.NREM_CODE;
+                for iEpoch = 2:length(T)
+                    sleepScoreVectorByChannel(c,T(iEpoch-1)*obj.samplingRate+1:T(iEpoch)*obj.samplingRate) = ...
+                        pointsPassedSleepThresh(iEpoch)*obj.NREM_CODE + pointsPassedREMThresh(iEpoch)*obj.REM_CODE;
+                end
+                
+                sleepScoreVectorClusterByChannel(c,1:T(1)*obj.samplingRate) = SWSbyCluster(1)*obj.NREM_CODE;
+                for iEpoch = 2:length(T)
+                    sleepScoreVectorClusterByChannel(c,T(iEpoch-1)*obj.samplingRate+1:T(iEpoch)*obj.samplingRate) = ...
+                        SWSbyCluster(iEpoch)*obj.NREM_CODE;
+                end
+                
+                % Make spectral data struct
+                spData = struct('channel',ch,'time',T,'freq',F,'spectralPower',P2,'deltaPower',P_delta,'spindlePower',P_sp);
+                if isempty(obj.spectralData)
+                    obj.spectralData = struct('channel',[],'time',[],'freq',[],'spectralPower',[],'deltaPower',[],'spindlePower',[]);
+                end
+                obj.spectralData(c) = spData;
                 
                 
-                axes('position',[0.4,0.2,0.3,0.3])
-                IDX.sleep_length_min = 1;
-                IDX.NREM_length_min = 2;
-                IDX.REM_length_min = 3;
-                SLEEP_properties_stats.IDX = IDX;
-                SLEEP_properties_stats.STATS(IDX.sleep_length_min) = (endInd-startInd)/(60*obj.samplingRate *60);
-                SLEEP_properties_stats.STATS(IDX.NREM_length_min) = 100*sum(sleep_score_vec == obj.NREM_CODE)/(endInd-startInd);
-                SLEEP_properties_stats.STATS(IDX.REM_length_min) = 100*sum(sleep_score_vec == obj.REM_CODE)/(endInd-startInd);
-              
-                text(0,0.6,sprintf('sleep length = %2.2fh',SLEEP_properties_stats.STATS(IDX.sleep_length_min)))
-                text(0,0.5,sprintf('NREM = %2.2f%%',SLEEP_properties_stats.STATS(IDX.NREM_length_min)))
-                text(0,0.4,sprintf('REM = ~%2.2f%%',SLEEP_properties_stats.STATS(IDX.REM_length_min)))
-                axis off
+                % Save everything per channel
                 
-                filename = sprintf('sleepScore_%s_E%d_%s_ch%d_stats',header.id,header.experimentNum,LocalHeader.origName,LocalHeader.channel_id);
-                save(fullfile(figure_folder,filename),'SLEEP_properties_IDX','SLEEP_properties');
-                PrintActiveFigs(figure_folder)
+                sleep_score_vec = sleepScoreVectorByChannel(c,:);
+                sleep_score_vec_cluster = sleepScoreVectorClusterByChannel(c,:);
+                obj.sleepScoreVectorByChannel(c,:) = sleep_score_vec;
+                obj.sleepScoreVectorClusterByChannel(c,:) = sleep_score_vec_cluster;
                 
+                if c==1 || ~exist('dataFromSleepSession','var')
+                    dataFromSleepSession = sess == sleepSess;
+                obj.sleepInds = dataFromSleepSession;
+                end
+                save(fullfile(obj.saveDir,sprintf('sleepScore_Ch%d',ch)),...
+                    'T','F','P2','sleep_score_vec','obj','P_delta','pointsPassedSleepThresh',...
+                    'pointsPassedREMThresh','thSleepInclusion','thREMInclusion','SWSbyCluster',...
+                    'sleep_score_vec_cluster','dataFromSleepSession','-v7.3')
+                
+                %% Make another fig...
+                if obj.PLOT_FIG
+                    
+                    figure_name_out = sprintf('sleepScore_Ch%d',ch);
+                    % re-compute spectrogram for prettier plots
+                    [S2,F2,T2,P2]  = spectrogram(data,window,0.8*window,[0.5:0.2:obj.flimits(2)],obj.samplingRate,'yaxis');
+                    spectrogram(data,window,0,[0.5:0.2:obj.flimits(2)],obj.samplingRate,'yaxis');
+                    
+                    P2 = P2/max(max(P2));
+                    P1 = (10*log10(abs(P2+obj.scaling_factor_delta_log)))';
+                    P1 = [P1(:,1) P1 P1(:,end)];
+                    T2 = [0 T2 T2(end)+1];
+                    Pplot = P1';% imgaussfilt(P1',3);
+                    
+                    % we have extra time points in T2, so need
+                    % pointsPassed*Threshold to be upsampled
+                    
+                    pps2 = interp1(T,double(pointsPassedSleepThresh),T2);
+                    ind = find(~isnan(pps2),1);
+                    pps2(1:ind-1) = pps2(ind);
+                    ind = find(~isnan(pps2),1,'last');
+                    pps2(ind+1:end) = pps2(ind);
+                    pps2 = logical(round(pps2));
+                    
+                    ppr2 = interp1(T,double(pointsPassedREMThresh),T2);
+                    ind = find(~isnan(ppr2),1);
+                    ppr2(1:ind-1) = ppr2(ind);
+                    ind = find(~isnan(ppr2),1,'last');
+                    ppr2(ind+1:end) = ppr2(ind);
+                    ppr2 = logical(round(ppr2));
+                    
+                    plotSpectrogramAndSpectra(obj,F2,T2,P1,data,figure_name_out,sleep_score_vec,pps2,ppr2)
+                    
+                end
+                end
             end
             
+            % save obj
+            obj.saveSelf;
         end
         
         
+        function obj = manuallyValidateSleepScoring(obj)
+            
+            if isnumeric(obj.experiment)
+                % get region list
+                info = getExperimentInfo(obj.subject,obj.experiment);
+                allChannels = cellfun(@(x)repmat({x},1,8),info.montagePos,'uniformoutput',0);
+                allChannels = cat(2,allChannels{:});
+                regions = allChannels(obj.bestScoringChannels);
+            else
+                regions = obj.bestScoringChannelNames';
+            end
+            % setup figure
+            f = figure('Name',sprintf('Sleep Scoring Validation: Subject %d, Exp %d',obj.subject,obj.experiment),...
+                'units','normalized','windowstyle','docked');%'position',[.5,.1,.45,.85]);
+            colormap('jet'); set(f,'DefaultAxesFontSize',14);
+            nPlots = length(obj.bestScoringChannels)+1;
+            pv = makePosVecFunction(nPlots,1,.05,0,.05);
+            ax = arrayfun(@(x)axes('parent',f,'units','normalized','position',pv(1,1,x,1)),1:nPlots,'uniformoutput',0);
+            hold(ax{end},'on')
+            col = spring(nPlots-1);
+            % Plot spectrograms, delta power and current sleep score
+            
+            
+            for c = 1:nPlots-1
+                hold(ax{c},'on')
+                ch = obj.bestScoringChannels(c);
+                thisData = load(fullfile(obj.saveDir,sprintf('sleepScore_Ch%d.mat',ch)));
+                byChannelData(c) = thisData;
+                colormap(ax{c},'jet'); set(ax{c},'clim',[-40 5],'ydir','normal');
+                imagesc(thisData.T,thisData.F,thisData.P2','parent',ax{c});
+                title(ax{c},sprintf('Channel %d (%s)',ch,regions{c}));
+                plot(ax{c},thisData.T(logical(thisData.pointsPassedSleepThresh)),20,'.r','markersize',obj.markerSize)
+                plot(ax{c},thisData.T(logical(thisData.pointsPassedREMThresh)),18,'.k','markersize',obj.markerSize)
+                plot(ax{c},thisData.T(logical(thisData.SWSbyCluster)),22,'.w','markersize',obj.markerSize)
+                plot(ax{c},thisData.T(obj.sleepRange(2,1))*[1 1],thisData.F([1 end]),'color',.75*[1 1 1],'linewidth',4)
+                plot(ax{c},thisData.T(obj.sleepRange(2,2))*[1 1],thisData.F([1 end]),'color',.75*[1 1 1],'linewidth',4)
+                plot(ax{c},thisData.T(obj.sleepRange(2,1))*[1 1],thisData.F([1 end]),'y','linewidth',2)
+                plot(ax{c},thisData.T(obj.sleepRange(2,2))*[1 1],thisData.F([1 end]),'y','linewidth',2)
+                plot(ax{end},thisData.T,thisData.P_delta/max(thisData.P_delta),'color',col(c,:),'linewidth',2)
+                plot(ax{end},thisData.T([1,length(thisData.T)]),thisData.thSleepInclusion/max(thisData.P_delta)*[1 1],'--','color',col(c,:),'linewidth',1)
+                plot(ax{end},thisData.T([1,length(thisData.T)]),thisData.thREMInclusion/max(thisData.P_delta)*[1 1],':','color',col(c,:),'linewidth',1)
+                if c==1
+                    sleepThreshCrossings = zeros(nPlots-1,length(thisData.pointsPassedSleepThresh));
+                    remThreshCrossings = zeros(nPlots-1,length(thisData.pointsPassedSleepThresh));
+                    clusteredSleepPoints = zeros(nPlots-1,length(thisData.pointsPassedSleepThresh));
+                end
+                sleepThreshCrossings(c,:) = thisData.pointsPassedSleepThresh;
+                remThreshCrossings(c,:) = thisData.pointsPassedREMThresh;
+                clusteredSleepPoints(c,:) = thisData.SWSbyCluster;
+            end
+
+            
+            yLim = get(ax{end},'ylim');
+            col = winter(nPlots);
+            
+            nSleep = sum(sleepThreshCrossings,1)+1;
+            nSleepCol = col(nSleep,:);
+            nREM = sum(remThreshCrossings)+1;
+            nREMCol = col(nREM,:);
+            
+            scatter(ax{end},thisData.T,repmat(mean(yLim),size(thisData.T)),15,nSleepCol,'filled');
+            scatter(ax{end},thisData.T,repmat(mean(yLim)/2,size(thisData.T)),15,nREMCol);
+            linkaxes([ax{:}],'x')
+            xlim([ax{1}],[thisData.T(1),thisData.T(end)])
+            
+            % collect mean/aggregate data
+            meanP2 = cat(3,{byChannelData.P2});
+            meanP1 = mean(cat(3,meanP2{:}),3);
+            meanP_delta = cat(2,{byChannelData.P_delta});
+            meanP_delta = mean(cat(2,meanP_delta{:}),2);
+            anyPointsPassedSleep = cat(2,{byChannelData.pointsPassedSleepThresh});
+            anyPointsPassedSleep = any(cat(2,anyPointsPassedSleep{:}),2);
+            anyPointsPassedREM = cat(2,{byChannelData.pointsPassedREMThresh});
+            anyPointsPassedREM = any(cat(2,anyPointsPassedREM{:}),2);
+            
+            % Ask for user input:
+            answer = input('Please enter your name\n','s');
+            manualResults.name = answer;
+            manualResults.datestamp = datestr(now,'yyyy-mm-dd,HH:MM');
+            manualResults.regionsModifiedByHand = [];
+            
+            sleep_score_vec = zeros(1,size(obj.sleepScoreVectorByChannel,2));
+            sleep_score_vec(any(obj.sleepScoreVectorByChannel==obj.REM_CODE)) = obj.REM_CODE;
+            sleep_score_vec(any(obj.sleepScoreVectorByChannel==obj.NREM_CODE)) = obj.NREM_CODE;
+            
+            for s = 1:2
+                switch s
+                    case 1
+                        sleepType = 'REM';
+                        code = obj.REM_CODE;
+                    case 2
+                        sleepType = 'NREM';
+                        code = obj.NREM_CODE;
+                end
+                
+                answer = input(sprintf('add a new %s session?(Y/N)', sleepType),'s');
+                while strcmpi(answer,'Y')
+                    [x,y] = ginput(2);
+                    x(x<0) = 0; x(x>thisData.T(end)) = thisData.T(end); x = sort(x);
+                    l1 = cellfun(@(AX)line(x(1)*ones(1,2),yLim,'color','r','parent',AX),ax,'uniformoutput',0);
+                    l2 = cellfun(@(AX)line(x(2)*ones(1,2),yLim,'color','g','parent',AX),ax,'uniformoutput',0);
+                    
+                    answer = input(sprintf('mark between lines as %s ?(Y/N)',sleepType),'s');
+                    if strcmpi(answer,'Y')
+                        [~, ind1] = min( abs(thisData.T-x(1)));
+                        [~, ind2] = min( abs(thisData.T-x(2)));
+                        if s == 1 % Add REM
+                            anyPointsPassedREM(ind1:ind2) = code;
+                            anyPointsPassedSleep(ind1:ind2) = 0;
+                        else % Add NREM
+                            anyPointsPassedSleep(ind1:ind2) = code;
+                            anyPointsPassedREM(ind1:ind2) = 0;
+                        end
+                        sleep_score_vec(max(floor(x(1)*obj.samplingRate),1):min(floor(x(2)*obj.samplingRate),length(sleep_score_vec))) = code;
+                        plot(ax{end},thisData.T(ind1:ind2),repmat(mean(yLim),1,ind2-ind1+1),'ro');
+                        manualResults.regionsModifiedByHand(end+1,:) = [floor(x(1)*obj.samplingRate), floor(x(2)*obj.samplingRate) code];
+                    end
+                    cellfun(@(x)delete(x),[l1 l2]);
+                    answer = input(sprintf('add an additonal new %s session?(Y/N)',sleepType),'s');
+                end
+                
+                answer = input(sprintf('Mark %s eopch as not %s?(Y/N)',sleepType,sleepType),'s');
+                while strcmpi(answer,'Y')
+                    [x,y] = ginput(2);
+                    x(x<0) = 0; x(x>thisData.T(end)) = thisData.T(end); x = sort(x);
+                    l1 = cellfun(@(AX)line(x(1)*ones(1,2),yLim,'color','r','parent',AX),ax,'uniformoutput',0);
+                    l2 = cellfun(@(AX)line(x(2)*ones(1,2),yLim,'color','g','parent',AX),ax,'uniformoutput',0);
+                    
+                    answer = input(sprintf('Remove %s designation between lines ?(Y/N)',sleepType),'s');
+                    if strcmpi(answer,'Y')
+                        [~, ind1] = min( abs(thisData.T-x(1)));
+                        [~, ind2] = min( abs(thisData.T-x(2)));
+                        anyPointsPassedSleep(ind1:ind2) = 0;
+                        anyPointsPassedREM(ind1:ind2) = 0;
+                        sleep_score_vec(max(floor(x(1)*obj.samplingRate),1):min(floor(x(2)*obj.samplingRate),length(sleep_score_vec))) = 0;
+                        plot(ax{end},thisData.T(ind1:ind2),repmat(mean(yLim),1,ind2-ind1+1),'wo');
+                        manualResults.regionsModifiedByHand(end+1,:) = [floor(x(1)*obj.samplingRate), floor(x(2)*obj.samplingRate) 0];
+                    end
+                    cellfun(@(x)delete(x),[l1 l2]);
+                    answer = input(sprintf('Delete an additonal %s section?(Y/N)',sleepType),'s');
+                end
+                
+            end
+            
+            
+            manualResults.finalSleepScoreVector = sleep_score_vec(obj.sleepRange(1,1):obj.sleepRange(1,2));
+            if isempty(obj.manualResults)
+                obj.manualResults = manualResults;
+            else
+                obj.manualResults = [obj.manualResults manualResults];
+            end
+            saveSelf(obj);
+            
+            % Make plots of final
+            figure_name_out = sprintf('Manually Validated Sleep Scoring_%s',strrep(obj.saveName,'SleepScoringObj_',''));
+            
+            channels = obj.bestScoringChannels;
+            for c = 1:length(channels)
+                ch = channels(c);
+                filename = dir(fullfile(obj.linkToConvertedData,sprintf('%s%d.*',obj.macroFilePrefix,ch)));
+                if isempty(filename)
+                    filename = dir(fullfile(obj.linkToConvertedData,sprintf('%s%d_*',obj.macroFilePrefix,ch)));
+                end
+                filename = fullfile(obj.linkToConvertedData,filename.name);
+                data = load(filename,'data');
+                if c==1
+                    allData = zeros(length(channels),length(data.data));
+                end
+                allData(c,:) = data.data;
+            end
+            
+            plotSpectrogramAndSpectra(obj,byChannelData(1).F,...
+                byChannelData(1).T(obj.sleepRange(2,1):obj.sleepRange(2,2)),...
+                meanP1(obj.sleepRange(2,1):obj.sleepRange(2,2),:),allData,...
+                figure_name_out,sleep_score_vec(obj.sleepRange(1,1):obj.sleepRange(1,2)),...
+                anyPointsPassedSleep(obj.sleepRange(2,1):obj.sleepRange(2,2)),...
+                anyPointsPassedREM(obj.sleepRange(2,1):obj.sleepRange(2,2)))
+        end
+        
         %% help functions
+        function obj = removeFromBestChannelsList(obj,indsToRemove)
+            obj.bestScoringChannels(indsToRemove) = [];
+            obj.sleepScoreVectorByChannel(indsToRemove,:) = [];
+            obj.NREMthresh(indsToRemove) = [];
+            obj.REMthresh(indsToRemove) = [];
+        end
+        
         function [f,psdx] = getPS(obj,segment)
-            %an help method to calcualte the power spectrum of a segment
+            %a helper method to calculate the power spectrum of a segment
             
             segLength = length(segment);
             xdft = fft(segment);
@@ -403,9 +790,9 @@ classdef sleepScoring_iEEG < handle
         
         function [f, pow] = hereFFT (obj, signal)
             % Calculate the fft of the signal, with the given sampling rate, make
-            % normalization(AUC=1). Return frequencis and respective powers.
+            % normalization(AUC=1). Return frequencies and respective powers.
             
-            % Matlab sorce code of FFT
+            % Matlab source code of FFT
             Y = fft(signal);
             power_spec = Y.* conj(Y) / length(signal);
             
@@ -444,6 +831,239 @@ classdef sleepScoring_iEEG < handle
             BP(indices) = NaN;
         end
         
+        function regions = plotHypnogramsPerChannel(obj,saveFigs)
+            
+            if ~exist('saveFigs','var') || isempty(saveFigs)
+                saveFigs = 1;
+            end
+            
+            
+            macroFiles = dir(fullfile(obj.linkToConvertedData,[obj.macroFilePrefix,'*']));
+            if strcmp(obj.macroFilePrefix,'MACRO')
+                hasBR = arrayfun(@(x)~isempty(regexp(x.name,'BR','once')),macroFiles);
+                macroFiles(hasBR) = [];
+            end
+            macroChannelNums = arrayfun(@(x)str2double(regexp(x.name,'\d*','once','match')),macroFiles);
+            [macroChannelNums,ind] = sort(macroChannelNums);
+            macroFiles = macroFiles(ind);
+            ind = macroChannelNums>128;
+            macroChannelNums(ind) = []; macroFiles(ind) = [];
+            
+            if isnumeric(obj.experiment)
+                info = getExperimentInfo(obj.subject,obj.experiment);
+                allChannels = cellfun(@(x)repmat({x},1,8),info.montagePos,'uniformoutput',0);
+                allChannels = cat(2,allChannels{:});
+                regions = allChannels(cellfun(@(x)~isempty(x),allChannels));%(macroChannelNums);
+                missingChannels = ~ismember(1:length(regions),macroChannelNums);
+                regions(missingChannels) = {'NotRecorded'};
+                if ~isempty(obj.filenameRegionCorrespondence)
+                    obj.filenameRegionCorrespondence(1,missingChannels) = {'NotRecorded'};
+                end
+            else
+                regions = arrayfun(@(x)regexp(x.name,'(?<=\_)[A-Z]*\d*','match','once'),macroFiles,'uniformoutput',0)';
+                % For consistency with file naming conventions, we have to
+                % have 8 macros per region, even if only 7 were recorded.
+                % So fix that here:
+                numsGiven = cellfun(@(x)str2double(x(end)),regions);
+                regionList = regions(numsGiven==1);
+                regionList = cellfun(@(x)arrayfun(@(y)strrep(x,'1',num2str(y)),1:8,'uniformoutput',0),regionList,'uniformoutput',0);
+                regionList = cat(2,regionList{:});
+                missing = ~ismember(regionList,regions);
+                regions = regionList; regions(missing) = {'NotRecorded'};
+            end
+            
+            
+            nFigs = ceil(length(regions)/24);
+            f = arrayfun(@(x)figure('units','normalized','position',[.2 .3 .6 .6]),1:nFigs,'uniformoutput',0);
+            ax = cellfun(@(x)arrayfun(@(m)subplot2(3,8,m,[],'borderPct',.025,'parent',x),1:24,'uniformoutput',0),f,'uniformoutput',0);
+            
+            for m = 1:length(macroFiles)
+                if mod(m,24)==1
+                    fprintf('\n')
+                end
+                fprintf('.')
+                thisAx = ax{ceil(m/24)}{modUp(m,24)};
+                plotHypnogram(fullfile(obj.linkToConvertedData,macroFiles(m).name),...
+                    thisAx,obj.startTime,obj.endTime);
+                title(thisAx,sprintf('%s (%s)',strrep(macroFiles(m).name,'.mat',''),regions{macroChannelNums(m)}),'interpreter','none');
+            end
+            %%
+            if saveFigs
+                saveDir = fullfile(obj.saveDir,'Per Channel Hypnograms');
+                if ~exist(saveDir)
+                    mkdir(saveDir);
+                end
+                for i = 1:length(f)
+                    export_fig(fullfile(saveDir,sprintf('Hypnograms Fig %d.pdf',i)),f{i})
+                end
+            end
+        end
+        
+        function plotSpectrogramAndSpectra(obj,F,T,P1,data,figure_name_out,sleep_score_vec,pointsPassedSleepThresh,pointsPassedREMThresh)
+            % prep fig
+            
+            f = figure('Name', figure_name_out,'NumberTitle','off');
+            set(gcf,'PaperUnits','centimeters','PaperPosition',[0.2 0.2 21 30]); % this size is the maximal to fit on an A4 paper when printing to PDF
+            set(gcf,'PaperOrientation','portrait');
+            set(gcf,'Units','centimeters','Position', get(gcf,'paperPosition')+[1 1 0 0]);
+            colormap('jet');
+            set(gcf,'DefaultAxesFontSize',14);
+            pv = makePosVecFunction(2,size(data,1),.075,.075,.04);
+            ax = axes('parent',f,'units','normalized','position',pv(1,size(data,1),1,1),...
+                'clim',[-40,-5],'ydir','normal');
+            
+            
+            
+            
+            start_time = datenum(obj.startTime,'yyyy/mm/dd HH:MM:SS');
+            end_time = datenum(obj.endTime,'yyyy/mm/dd HH:MM:SS');
+            xData = linspace(start_time,end_time,length(P1));
+            
+            % plot spectrogram
+            imagesc(xData,F,P1','parent',ax)
+            axis([get(ax,'xlim'),[0.5,20]])
+            set(ax,'ytick',[0.5,10,20])
+            datetick('x','HH:MM PM','keeplimits')
+            
+            % Add annotation for sleep stage
+            hold on
+            xData2 = linspace(start_time,end_time,length(T));
+            if sum(pointsPassedSleepThresh)>0
+                plot(ax,xData2(logical(pointsPassedSleepThresh)),20,'.r','markersize',obj.markerSize)
+            end
+            if sum(pointsPassedREMThresh)>0
+                plot(ax,xData2(logical(pointsPassedREMThresh)),18,'.k','markersize',obj.markerSize)
+            end
+            set(ax,'ydir','normal')
+            % finish plot
+            yticks = obj.flimits(1):5:obj.flimits(2);
+            colorbar
+            title_str = sprintf('Sleep scoring - NREM (red), Wake/REM (black)');
+            axis([get(ax,'xlim'),[0.5,30]])
+            set(ax,'ytick',[0.5,10,20,30])
+            YLIM = get(ax,'ylim');
+            xlabel('t (hh:mm)')
+            ylabel('f (Hz)')
+            title(title_str)
+            
+            % New plot(s) for spectra of different sleep stages
+            for ch = 1:size(data,1)
+                ax = axes('parent',f,'units','normalized','position',pv(ch,1,2,1));
+                sleepRangeVec = zeros(1,length(sleep_score_vec));
+                startInd = find(sleep_score_vec == obj.NREM_CODE,1,'first');
+                endInd = find(sleep_score_vec == obj.NREM_CODE,1,'last');
+                sleepRangeVec(startInd:endInd) = 1;
+                
+                % compute and plot spectra
+                legendText = {};
+                for ii_a = 1:3
+                    if ii_a == 1
+                        a_data =  data(ch,sleep_score_vec == obj.NREM_CODE);
+                        legendText{end+1} = 'SWS';
+                        col = 'b';
+                    elseif ii_a == 2
+                        a_data =  data(ch,sleep_score_vec == obj.REM_CODE);
+                        legendText{end+1} = 'REM*';
+                        col = 'g';
+                    elseif ii_a == 3
+                        a_data =  data(ch,~sleepRangeVec);
+                        legendText{end+1} = 'Wake/Transition*';
+                        col = .5*[1 1 1];
+                    end
+                    
+                    if ~isempty(a_data)
+                        
+                        a_data = a_data - mean(a_data);
+                        freq = 0:obj.samplingRate/2;
+                        WIN = min(500,length(a_data));
+                        NOVERLAP = min(400,WIN/2);
+                        [pxx1, f1] = pwelch(a_data,WIN,NOVERLAP,freq,obj.samplingRate);
+                        
+                        hold(ax,'on')
+                        plot(ax,f1,10*log10(pxx1),'color',col,'linewidth',2)
+
+                    else
+                        legendText(end) = [];
+                    end
+                end
+                
+                % finish plot
+                axis(ax,[0 25,0,inf])
+                xlabel(ax,'f(Hz)')
+                ylabel(ax,'dB')
+                legend(ax,legendText)
+                title(ax,sprintf('power spectra (%s)',obj.bestScoringChannelNames{ch}))
+            end
+            
+            pv2 = makePosVecFunction(2,1,0,0,.05);
+            panel = uipanel('parent',f,'units','normalized','position',pv2(1.65,.23,.2,.18),'BackgroundColor','w');
+            ax2 = axes('parent',panel,'units','normalized','position',pv2(1,1,2,2));
+            if isempty(endInd)
+                text(0,0.7,'sleep length = 0 h','parent',ax2)
+            else
+                text(0,0.7,sprintf('sleep length = %2.2fh',(endInd-startInd)/obj.samplingRate/60/60),'parent',ax2)
+                text(0,0.5,sprintf('NREM = %2.2f%%',100*sum(sleep_score_vec == obj.NREM_CODE)/(endInd-startInd)),'parent',ax2)
+                text(0,0.3,sprintf('REM = ~%2.2f%%',100*sum(sleep_score_vec == obj.REM_CODE)/(endInd-startInd)),'parent',ax2)
+            end
+            axis(ax2,'off')
+            
+            % Save Fig
+            export_fig(f,fullfile(obj.saveDir,[figure_name_out,'.pdf']))
+        end
+        
+        function saveSelf(obj,createNew)
+            if exist('createNew','var') && createNew
+                obj.saveName = ['sleepScoringObj_',datestr(now,'yyyy_mm_dd-HH_MM')];
+            end
+            if ~exist(obj.saveDir,'dir')
+                mkdir(obj.saveDir);
+            end
+            save(fullfile(obj.saveDir,obj.saveName),'-v7.3')
+        end
+        
+        function saveAsData(obj)
+            fn = fieldnames(obj);
+            str = struct();
+            for i = 1:length(fn)
+                str.(fn{i}) = obj.(fn{i});
+            end
+            saveAsName = strrep(obj.saveName,'Obj','Data');
+            save(fullfile(obj.saveDir,saveAsName),'-struct','str','-v7.3');
+        end
+        
+        function obj = cleanObjPaths(obj)
+            obj.saveDir = cleanPathForThisSystem(obj.saveDir);
+            obj.linkToConvertedData = cleanPathForThisSystem(obj.linkToConvertedData);
+            obj.linkToMacroRawData = cleanPathForThisSystem(obj.linkToMacroRawData);
+        end
+        
+        function [time0, timeend] = unpackAMacro(obj,f,needsTS,newNames,macroRawFiles,sourceLocation,destLocation,time0,timeend)
+            if exist(fullfile(sourceLocation,macroRawFiles{f}),'file')
+            if f==1 && needsTS
+                computeTS = 1;
+            else
+                computeTS = 0;
+            end
+            disp(['Processing ',newNames{f}])
+            [data,timeStamps,samplingInterval,chNum] = ...
+                Nlx_readCSC(fullfile(sourceLocation,macroRawFiles{f}),computeTS);
+            data = reshape(data,1,[]);
+            if ~exist('time0','var')
+                time0 = timeStamps(1);
+                timeend = timeStamps(end);
+            end
+            
+            save(fullfile(destLocation,newNames{f}),...
+                'data','samplingInterval','time0','timeend','-v7.3');
+            
+            if computeTS
+                save(fullfile(destLocation,'lfpTimeStampsMACRO.mat'),...
+                    'timeStamps','time0','timeend','-v7.3');
+            end
+            else
+                fprintf('No raw macro file: %s',macroRawFiles{f});
+            end
+        end
         
     end % methods
     
