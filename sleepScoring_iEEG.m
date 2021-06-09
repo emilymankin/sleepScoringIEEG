@@ -127,6 +127,7 @@ classdef sleepScoring_iEEG < handle
                                 obj.postData.linkToMacroRawData = strrep(infoPost.linkToRaw,'ns5','ns3');
                                 [obj.postData.startTime, obj.postData.endTime] = BR_getStartAndEndTimes(infoPost.linkToRaw);
                             end
+                            obj.getFileRegionCorrespondence('BR');
                         else
                             fprintf('\nPlease find an Nlx raw data file for experiment %d\n', experiment);
                             [filename, pathname] = uigetfile('*.ncs',sprintf('Please find an Nlx raw data file for experiment %d', experiment));
@@ -144,6 +145,7 @@ classdef sleepScoring_iEEG < handle
                                 obj.postData.linkToMacroRawData = pathname;
                                 [obj.postData.startTime, obj.postData.endTime] = Nlx_getStartAndEndTimes(fullfile(pathname,filename));
                             end
+                            obj.getFileRegionCorrespondence('Nlx');
                         end
                         
                     case 'Neuralynx'
@@ -172,6 +174,7 @@ classdef sleepScoring_iEEG < handle
                             obj.postData.linkToMacroRawData = infoPost.linkToRaw;
                             [obj.postData.startTime, obj.postData.endTime] = Nlx_getStartAndEndTimes(fullfile(infoPost.linkToRaw,filename));
                         end
+                        obj.getFileRegionCorrespondence('Nlx');
                 end
             elseif isempty(obj.startTime)
                 if exist(obj.linkToMacroRawData,'dir')
@@ -211,21 +214,37 @@ classdef sleepScoring_iEEG < handle
             obj.saveSelf;
         end
         
-        function obj = unpackMacrosWithPrePost(obj,doPre,doPost)
-            % First figure out whether macros have been upnacked in the
-            % main folder, and what filenames were used
-%             macroRawFiles = dir(fullfile(obj.linkToMacroRawData,'*.ncs'));
-%             macroRawFiles = {macroRawFiles.name};
-%             notReallyMacro = cellfun(@(x)~strcmp(x(1),'L') && ~strcmp(x(1),'R'),macroRawFiles);
-%             macroRawFiles(notReallyMacro) = [];
-%             macroRawFiles = cellfun(@(x)regexprep(x,'\_\d{4}',''),macroRawFiles,'uniformoutput',0);
+        function obj = getFileRegionCorrespondence(obj,macroSystem)
+            % Getting macro regions and filenames was done a few times
+            % throughout this code, inconsistently. And now that we can
+            % record macros on BR as well as Nlx it gets even more
+            % confusing. Trying to simplify by doing it once and storing in
+            % the object's property filenameRegionCorresponcence, which
+            % will now be a 4 x nMacroFile cell where each column represents
+            % one macro file with row 1 being filename, row 2 region,
+            % row 3 the best title string to use, and row 4 the channel number.
+            % This code will probably need some debugging....
+            macroFiles = dir(fullfile(obj.linkToConvertedData,[obj.macroFilePrefix,'*']));
             
+            if isempty(macroFiles)
+                obj = unpackMacrosWithPrePost(obj,doPre,doPost);
+                macroFiles = dir(fullfile(obj.linkToConvertedData,[obj.macroFilePrefix,'*']));
+            end
+            
+            macroChannelNums = arrayfun(@(x)str2double(regexp(x.name,'\d*','once','match')),macroFiles);
+            [macroChannelNums,ind] = sort(macroChannelNums);
+            macroFiles = macroFiles(ind);
             thisExp = getExperimentInfo(obj.subject,obj.experiment);
+            
+            switch macroSystem
+                case 'Nlx'
+                           warning('This code hasn''t been tested since we moved it around. I''m putting you in keyboard mode so you can put a debug stop in and go from there.')
+                           keyboard
             brainRegions = thisExp.montagePos;
-brainRegions(cellfun(@(x)isempty(x),brainRegions)) = [];
-macroRawFiles = cellfun(@(x)[arrayfun(@(y)sprintf('%s%d.ncs',x,y),1:8,'uniformoutput',0)],brainRegions,'uniformoutput',0);
-macroRawFiles = cat(2,macroRawFiles{:});
-
+            brainRegions(cellfun(@(x)isempty(x),brainRegions)) = [];
+            macroRawFiles = cellfun(@(x)[arrayfun(@(y)sprintf('%s%d.ncs',x,y),1:8,'uniformoutput',0)],brainRegions,'uniformoutput',0);
+            macroRawFiles = cat(2,macroRawFiles{:});
+            
             fullNames = arrayfun(@(x)sprintf('%s%d_%s.mat',obj.macroFilePrefix,x,...
                 regexp(macroRawFiles{x},'[A-Z]*\d','match','once')),1:length(macroRawFiles),'uniformoutput',0);
             simpleNames = arrayfun(@(x)sprintf('%s%d.mat',obj.macroFilePrefix,x),1:length(macroRawFiles),'uniformoutput',0);
@@ -238,6 +257,161 @@ macroRawFiles = cat(2,macroRawFiles{:});
             end
             obj.filenameRegionCorrespondence = [fileNames;fullNames];
             
+            
+            % The code block below was elsewhere, and it differs from the
+            % block above. Need to debug both to figure out why I did one
+            % thing in one place and one in another. 
+            
+%             
+%             if strcmp(obj.macroFilePrefix,'MACRO')
+%                 hasBR = arrayfun(@(x)~isempty(regexp(x.name,'BR','once')),macroFiles);
+%                 macroFiles(hasBR) = [];
+%             end
+
+%             
+%             % EM: I had this here previously, withouth the if for 
+%             % compatibility with Nlx macros, since they are always between channels 1 and 128.
+%             % but it messes things up when
+%             % macros were recorded on BR. So here I just added the if
+%             % around it so that this will only be done for Nlx.
+%             if strcmp(obj.macroFilePrefix,'MACRO')
+%             ind = macroChannelNums>128;
+%             macroChannelNums(ind) = []; macroFiles(ind) = [];
+%             end
+%             
+%             %EM: Again, the code below assumes our Nlx conventions, as it
+%             %was written before we started having macros on BR. So I'm
+%             %putting an if around it, and will just ask for BR channels to
+%             %be intered by hand. Someday I need to update the code to deal
+%             %with BR macros but I won't do that in the current
+%             %instantiation of patientDataManager...
+%             if strcmp(obj.macroFilePrefix,'MACRO')
+%             if isnumeric(obj.experiment)
+%                 info = getExperimentInfo(obj.subject,obj.experiment);
+%                 allChannels = cellfun(@(x)repmat({x},1,8),info.montagePos,'uniformoutput',0);
+%                 allChannels = cat(2,allChannels{:});
+%                 regions = allChannels(cellfun(@(x)~isempty(x),allChannels));%(macroChannelNums);
+%                 missingChannels = ~ismember(1:length(regions),macroChannelNums);
+%                 regions(missingChannels) = {'NotRecorded'};
+%                 if ~isempty(obj.filenameRegionCorrespondence)
+%                     obj.filenameRegionCorrespondence(1,missingChannels) = {'NotRecorded'};
+%                 end
+%             else
+%                 regions = arrayfun(@(x)regexp(x.name,'(?<=\_)[A-Z]*\d*','match','once'),macroFiles,'uniformoutput',0)';
+%                 % For consistency with file naming conventions, we have to
+%                 % have 8 macros per region, even if only 7 were recorded.
+%                 % So fix that here:
+%                 numsGiven = cellfun(@(x)str2double(x(end)),regions);
+%                 regionList = regions(numsGiven==1);
+%                 regionList = cellfun(@(x)arrayfun(@(y)strrep(x,'1',num2str(y)),1:8,'uniformoutput',0),regionList,'uniformoutput',0);
+%                 regionList = cat(2,regionList{:});
+%                 missing = ~ismember(regionList,regions);
+%                 regions = regionList; regions(missing) = {'NotRecorded'};
+%             end
+            
+                case 'BR'
+                   disp('Macros were recorded on BR. Please enter a string in the following format:')
+                disp('{region1,channelList,region2,channelList....}')
+                disp('For example: {''RA'',1:7,''RAH'',8:15,...}')
+                disp('Note that macros are typically recorded on channels 129+, so if you start from 1, we will add 128. But if you start from another number, we will assume you mean that literally.')
+                ok = 0;
+                regList = input('','s');
+                while ~ok
+
+                if strcmpi(regList,'cancel')
+                    return
+                elseif strcmpi(regList,'exc')
+                    disp(exception)
+                    disp('type dbcont to continue')
+                    keyboard
+                end
+                try
+                    regList = eval(regList);
+                    if all(cellfun(@(x)ischar(x),regList(1:2:end))) & ...
+                            all(cellfun(@(x)isnumeric(x),regList(2:2:end)))
+                    ok = 1;
+                    else
+                        regList = input('You used the wrong file format. Please see the example above and try again (or type ''cancel'' to get out of this loop)\n','s');
+                    end
+                catch exception
+                    regList = input('You typed something wrong. Please try again (or type ''cancel'' to get out of this loop or exc to display the exception)\n','s');
+                end
+                end
+                if regList{2}(1)==1
+                    add128 = 1;
+                else
+                    add128 = 0;
+                end
+                regionList = cell(1,regList{end}(end)+128*add128);
+                withinRegionChannelList = regionList;
+                for ii = 1:2:length(regList)
+                 regionList(regList{ii+1}+128*add128) = regList(ii);
+                 withinRegionChannelList(regList{ii+1}+128*add128) = els2cells(1:length(regList{ii+1}));
+                end
+                filenameList = cell(1,max(macroChannelNums));
+                for ii = 1:length(macroChannelNums)
+                    filenameList{macroChannelNums(ii)} = macroFiles(ii).name;
+                end
+                
+                [common toKeep missing] = getCommonElements(macroChannelNums,find(cellfun(@(x)~isempty(x),regionList)));
+                worryString = [];
+                if ~isempty(missing{1})
+                    worryString = [worryString sprintf('This file exists but doesn''t have a region associated to it: %s\n',filenameList{missing{1}})];
+                end
+                if ~isempty(missing{2})
+                    worryString = [worryString sprintf('This region is listed but doesn''t have a file associated to it: %s%d\n',regionList{missing{2}},withinRegionChannelList{missing{2}})];
+                end
+                if ~isempty(worryString)
+                    warning(sprintf('The file list and region list weren''t in perfect agreement.\n%s Please double check and type dbcont once regionList, withinRegionChannelList,and filenameList are okay. We will take only the common elements from each.',worryString))
+                    keyboard
+                    [common toKeep missing] = getCommonElements(find(cellfun(@(x)~isempty(x),filenameList)),find(cellfun(@(x)~isempty(x),regionList)));
+                end
+                filenameList = filenameList(common);
+                regionList = regionList(common);
+                withinRegionChannelList = withinRegionChannelList(common);
+                titleStrings = cellfun(@(fn,r,n)sprintf('%s%d (%s)',r,n,fn),...
+                    cellfun(@(x)strrep(x,'.mat',''),filenameList,'uniformoutput',0),regionList,withinRegionChannelList,'uniformoutput',0);
+                
+                obj.filenameRegionCorrespondence = [filenameList; regionList; titleStrings; els2cells(common)'];
+            end
+            obj.saveSelf;
+        end
+
+        
+        
+        
+        function obj = unpackMacrosWithPrePost(obj,doPre,doPost)
+            % First figure out whether macros have been upnacked in the
+            % main folder, and what filenames were used
+            %             macroRawFiles = dir(fullfile(obj.linkToMacroRawData,'*.ncs'));
+            %             macroRawFiles = {macroRawFiles.name};
+            %             notReallyMacro = cellfun(@(x)~strcmp(x(1),'L') && ~strcmp(x(1),'R'),macroRawFiles);
+            %             macroRawFiles(notReallyMacro) = [];
+            %             macroRawFiles = cellfun(@(x)regexprep(x,'\_\d{4}',''),macroRawFiles,'uniformoutput',0);
+            
+            
+            %The code block below has been moved to
+            %getFileRegionCorrespondence, but I'm leaving it here for now
+            %in case it makes more sense to have it here...
+            %
+%             thisExp = getExperimentInfo(obj.subject,obj.experiment);
+%             brainRegions = thisExp.montagePos;
+%             brainRegions(cellfun(@(x)isempty(x),brainRegions)) = [];
+%             macroRawFiles = cellfun(@(x)[arrayfun(@(y)sprintf('%s%d.ncs',x,y),1:8,'uniformoutput',0)],brainRegions,'uniformoutput',0);
+%             macroRawFiles = cat(2,macroRawFiles{:});
+%             
+%             fullNames = arrayfun(@(x)sprintf('%s%d_%s.mat',obj.macroFilePrefix,x,...
+%                 regexp(macroRawFiles{x},'[A-Z]*\d','match','once')),1:length(macroRawFiles),'uniformoutput',0);
+%             simpleNames = arrayfun(@(x)sprintf('%s%d.mat',obj.macroFilePrefix,x),1:length(macroRawFiles),'uniformoutput',0);
+%             alreadyExists = logical(cellfun(@(x)exist(fullfile(obj.linkToConvertedData,x),'file'),fullNames));
+%             alreadyExists_simple = logical(cellfun(@(x)exist(fullfile(obj.linkToConvertedData,x),'file'),simpleNames));
+%             if sum(alreadyExists_simple)>sum(alreadyExists)
+%                 fileNames = simpleNames;
+%             else
+%                 fileNames = fullNames;
+%             end
+%             obj.filenameRegionCorrespondence = [fileNames;fullNames];
+            
             % Now unpack macros in each location
             obj = unpackMacros(obj, obj.linkToConvertedData,obj.linkToMacroRawData,fileNames,macroRawFiles);
             if doPre
@@ -248,32 +422,38 @@ macroRawFiles = cat(2,macroRawFiles{:});
             end
         end
         
-        function obj = unpackMacros(obj, linkToConvertedData,linkToMacroRawData,fileNames,rawFileNames);
+        function obj = unpackMacros(obj, linkToConvertedData,linkToMacroRawData,fileNames,rawFileNames)
+            if strcmp(obj.macroPrefix,'MACRO')
             alreadyConverted = logical(cellfun(@(x)exist(fullfile(linkToConvertedData,x),'file'),fileNames));
             fileNames(alreadyConverted) = [];
             rawFileNames(alreadyConverted) = [];
             
             if ~isempty(fileNames)
-            needsTS = ~exist(fullfile(linkToConvertedData,'lfpTimeStampsMACRO.mat'),'file');
-            macroRawFiles = dir(fullfile(linkToMacroRawData,'*.ncs'));
-            macroRawFiles = {macroRawFiles.name};
-            suffix = regexp(macroRawFiles{1},'\_\d{4}\.ncs','match','once');
-            if ~isempty(suffix)
-                macroRawFiles = cellfun(@(x)strrep(x,'.ncs',suffix),rawFileNames,'uniformoutput',0);
+                needsTS = ~exist(fullfile(linkToConvertedData,'lfpTimeStampsMACRO.mat'),'file');
+                macroRawFiles = dir(fullfile(linkToMacroRawData,'*.ncs'));
+                macroRawFiles = {macroRawFiles.name};
+                suffix = regexp(macroRawFiles{1},'\_\d{4}\.ncs','match','once');
+                if ~isempty(suffix)
+                    macroRawFiles = cellfun(@(x)strrep(x,'.ncs',suffix),rawFileNames,'uniformoutput',0);
+                else
+                    macroRawFiles = rawFileNames;
+                end
+                rawExists = logical(cellfun(@(x)exist(fullfile(linkToMacroRawData,x),'file'),macroRawFiles));
+                macroRawFiles = macroRawFiles(rawExists);
+                fileNames = fileNames(rawExists);
+                if ~isempty(macroRawFiles)
+                    [time0,timeend] = unpackAMacro(obj,1,needsTS,fileNames,macroRawFiles,linkToMacroRawData,linkToConvertedData);
+                    for f = 2:length(fileNames)
+                        unpackAMacro(obj,f,0,fileNames,macroRawFiles,linkToMacroRawData,linkToConvertedData,time0,timeend);
+                    end
+                end
+            end
             else
-                macroRawFiles = rawFileNames;
+                % Unpack BR Macros
+               warning('Uh oh, this isn''t written for BR macros. If you''re here, it means it''s time to fix that.')
+               keyboard
+                
             end
-            rawExists = logical(cellfun(@(x)exist(fullfile(linkToMacroRawData,x),'file'),macroRawFiles));
-            macroRawFiles = macroRawFiles(rawExists);
-            fileNames = fileNames(rawExists);
-            if ~isempty(macroRawFiles)
-            [time0,timeend] = unpackAMacro(obj,1,needsTS,fileNames,macroRawFiles,linkToMacroRawData,linkToConvertedData);
-           for f = 2:length(fileNames)
-                unpackAMacro(obj,f,0,fileNames,macroRawFiles,linkToMacroRawData,linkToConvertedData,time0,timeend);
-            end
-            end
-            end
-            %             end
         end
         
         
@@ -282,32 +462,25 @@ macroRawFiles = cat(2,macroRawFiles{:});
                 skipPlotting = exist(fullfile(obj.saveDir,'Per Channel Hypnograms'),'dir');
             end
             if ~skipPlotting
-                regions = plotHypnogramsPerChannel(obj,1);
-            else
-                macroFiles = dir(fullfile(obj.linkToConvertedData,[obj.macroFilePrefix,'*']));
-                macroChannelNums = arrayfun(@(x)str2double(regexp(x.name,'\d*','once','match')),macroFiles);
-                [macroChannelNums,ind] = sort(macroChannelNums);
-                macroFiles = macroFiles(ind);
-                ind = macroChannelNums>128;
-                macroChannelNums(ind) = []; macroFiles(ind) = [];
-                
-                info = getExperimentInfo(obj.subject,obj.experiment);
-                allChannels = cellfun(@(x)repmat({x},1,8),info.montagePos,'uniformoutput',0);
-                allChannels = cat(2,allChannels{:});
-                regions = allChannels;%(macroChannelNums);
+                plotHypnogramsPerChannel(obj,1);
             end
+            
             channelsToUse = inputdlg('Which channel(s) should be used for sleep scoring? (If more than one, please enter inside brackets)',...
                 'ChannelSelection');
             obj.bestScoringChannels = eval(channelsToUse{1});
-            if ~isempty(obj.filenameRegionCorrespondence)
-                bestScoringChannelNames = obj.filenameRegionCorrespondence(2,obj.bestScoringChannels);
-                obj.bestScoringChannelNames = cellfun(@(x)regexp(x,'(?<=\_)[A-Z]*\d*','match','once'),bestScoringChannelNames,'uniformoutput',0);
-            elseif exist('regions','var')
-                
-                obj.bestScoringChannelNames = regions(obj.bestScoringChannels);
-            else
-                obj.bestScoringChannelNames = arrayfun(@(x)sprintf('Channel %d',x),obj.bestScoringChannels,'uniformoutput',0);
+            
+            if size(obj.filenameRegionCorrespondence,1)<5
+                obj.filenameRegionCorrespondence(5,:) = cellfun(@(x)regexp(x,'\w*','match','once'),obj.filenameRegionCorrespondence(3,:),'uniformoutput',0);
             end
+            if isnumeric(obj.bestScoringChannels),
+                inds = ismember(cell2mat(obj.filenameRegionCorrespondence(4,:)),obj.bestScoringChannels);
+                obj.bestScoringChannelNames = obj.filenameRegionCorrespondence(5,inds);
+            else
+                inds = ismember(obj.filenameRegionCorrespondence(5,:),obj.bestScoringChannels);
+                obj.bestScoringChannelNames = obj.filenameRegionCorrespondence(5,inds);
+                obj.bestScoringChannels = cell2mat(obj.filenameRegionCorrespondence(4,inds));
+            end
+
             obj.saveSelf;
         end
         
@@ -591,15 +764,7 @@ macroRawFiles = cat(2,macroRawFiles{:});
         
         function obj = manuallyValidateSleepScoring(obj)
             
-            if isnumeric(obj.experiment)
-                % get region list
-                info = getExperimentInfo(obj.subject,obj.experiment);
-                allChannels = cellfun(@(x)repmat({x},1,8),info.montagePos,'uniformoutput',0);
-                allChannels = cat(2,allChannels{:});
-                regions = allChannels(obj.bestScoringChannels);
-            else
                 regions = obj.bestScoringChannelNames';
-            end
             % setup figure
             f = figure('Name',sprintf('Sleep Scoring Validation: Subject %d, Exp %d',obj.subject,obj.experiment),...
                 'units','normalized','windowstyle','docked');%'position',[.5,.1,.45,.85]);
@@ -838,42 +1003,10 @@ macroRawFiles = cat(2,macroRawFiles{:});
             end
             
             
-            macroFiles = dir(fullfile(obj.linkToConvertedData,[obj.macroFilePrefix,'*']));
-            if strcmp(obj.macroFilePrefix,'MACRO')
-                hasBR = arrayfun(@(x)~isempty(regexp(x.name,'BR','once')),macroFiles);
-                macroFiles(hasBR) = [];
-            end
-            macroChannelNums = arrayfun(@(x)str2double(regexp(x.name,'\d*','once','match')),macroFiles);
-            [macroChannelNums,ind] = sort(macroChannelNums);
-            macroFiles = macroFiles(ind);
-            ind = macroChannelNums>128;
-            macroChannelNums(ind) = []; macroFiles(ind) = [];
-            
-            if isnumeric(obj.experiment)
-                info = getExperimentInfo(obj.subject,obj.experiment);
-                allChannels = cellfun(@(x)repmat({x},1,8),info.montagePos,'uniformoutput',0);
-                allChannels = cat(2,allChannels{:});
-                regions = allChannels(cellfun(@(x)~isempty(x),allChannels));%(macroChannelNums);
-                missingChannels = ~ismember(1:length(regions),macroChannelNums);
-                regions(missingChannels) = {'NotRecorded'};
-                if ~isempty(obj.filenameRegionCorrespondence)
-                    obj.filenameRegionCorrespondence(1,missingChannels) = {'NotRecorded'};
-                end
-            else
-                regions = arrayfun(@(x)regexp(x.name,'(?<=\_)[A-Z]*\d*','match','once'),macroFiles,'uniformoutput',0)';
-                % For consistency with file naming conventions, we have to
-                % have 8 macros per region, even if only 7 were recorded.
-                % So fix that here:
-                numsGiven = cellfun(@(x)str2double(x(end)),regions);
-                regionList = regions(numsGiven==1);
-                regionList = cellfun(@(x)arrayfun(@(y)strrep(x,'1',num2str(y)),1:8,'uniformoutput',0),regionList,'uniformoutput',0);
-                regionList = cat(2,regionList{:});
-                missing = ~ismember(regionList,regions);
-                regions = regionList; regions(missing) = {'NotRecorded'};
-            end
+            macroFiles = obj.filenameRegionCorrespondence(1,:);
             
             
-            nFigs = ceil(length(regions)/24);
+            nFigs = ceil(size(obj.filenameRegionCorrespondence,2)/24);
             f = arrayfun(@(x)figure('units','normalized','position',[.2 .3 .6 .6]),1:nFigs,'uniformoutput',0);
             ax = cellfun(@(x)arrayfun(@(m)subplot2(3,8,m,[],'borderPct',.025,'parent',x),1:24,'uniformoutput',0),f,'uniformoutput',0);
             
@@ -883,9 +1016,9 @@ macroRawFiles = cat(2,macroRawFiles{:});
                 end
                 fprintf('.')
                 thisAx = ax{ceil(m/24)}{modUp(m,24)};
-                plotHypnogram(fullfile(obj.linkToConvertedData,macroFiles(m).name),...
+                plotHypnogram(fullfile(obj.linkToConvertedData,macroFiles{m}),...
                     thisAx,obj.startTime,obj.endTime);
-                title(thisAx,sprintf('%s (%s)',strrep(macroFiles(m).name,'.mat',''),regions{macroChannelNums(m)}),'interpreter','none');
+                title(thisAx,obj.filenameRegionCorrespondence{3,m},'interpreter','none');
             end
             %%
             if saveFigs
