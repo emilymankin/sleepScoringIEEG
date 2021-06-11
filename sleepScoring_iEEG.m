@@ -313,7 +313,7 @@ classdef sleepScoring_iEEG < handle
                    disp('Macros were recorded on BR. Please enter a string in the following format:')
                 disp('{region1,channelList,region2,channelList....}')
                 disp('For example: {''RA'',1:7,''RAH'',8:15,...}')
-                disp('Note that macros are typically recorded on channels 129+, so if you start from 1, we will add 128. But if you start from another number, we will assume you mean that literally.')
+                disp('Note that BR macros are typically recorded on higher channels (97+ or 129+), so if you start from 1, we will add what''s necessary to get everything up to the first MACROBR channel that exists. But if you start from another number, we will assume you mean that literally.')
                 ok = 0;
                 regList = input('','s');
                 while ~ok
@@ -338,15 +338,15 @@ classdef sleepScoring_iEEG < handle
                 end
                 end
                 if regList{2}(1)==1
-                    add128 = 1;
+                    offset = min(macroChannelNums)-1;
                 else
-                    add128 = 0;
+                    offset = 0;
                 end
-                regionList = cell(1,regList{end}(end)+128*add128);
+                regionList = cell(1,regList{end}(end)+offset);
                 withinRegionChannelList = regionList;
                 for ii = 1:2:length(regList)
-                 regionList(regList{ii+1}+128*add128) = regList(ii);
-                 withinRegionChannelList(regList{ii+1}+128*add128) = els2cells(1:length(regList{ii+1}));
+                 regionList(regList{ii+1}+offset) = regList(ii);
+                 withinRegionChannelList(regList{ii+1}+offset) = els2cells(1:length(regList{ii+1}));
                 end
                 filenameList = cell(1,max(macroChannelNums));
                 for ii = 1:length(macroChannelNums)
@@ -1002,7 +1002,14 @@ classdef sleepScoring_iEEG < handle
                 saveFigs = 1;
             end
             
-            
+            if isempty(obj.filenameRegionCorrespondence)
+                switch (obj.macroFilePrefix)
+                    case 'MACRO',
+                        obj.getFileRegionCorrespondence('Nlx');
+                    case 'MACROBR',
+                        obj.getFileRegionCorrespondence('BR');
+                end
+            end
             macroFiles = obj.filenameRegionCorrespondence(1,:);
             
             
