@@ -211,6 +211,7 @@ classdef sleepScoring_iEEG < handle
                 dateFormat = 'yyyy/mm/dd HH:MM:SS';
                 obj.endTime = datestr(datenum(obj.startTime,dateFormat)+sessionDurationSeconds/24/60/60,dateFormat);
             end
+            obj.getFileRegionCorrespondence;
             obj.saveSelf;
         end
         
@@ -226,6 +227,7 @@ classdef sleepScoring_iEEG < handle
             % This code will probably need some debugging....
             macroFiles = dir(fullfile(obj.linkToConvertedData,[obj.macroFilePrefix,'*']));
             
+            doPre = ~isempty(obj.preData); doPost = ~isempty(obj.postData);
             if isempty(macroFiles)
                 obj = unpackMacrosWithPrePost(obj,doPre,doPost);
                 macroFiles = dir(fullfile(obj.linkToConvertedData,[obj.macroFilePrefix,'*']));
@@ -234,6 +236,12 @@ classdef sleepScoring_iEEG < handle
             macroChannelNums = arrayfun(@(x)str2double(regexp(x.name,'\d*','once','match')),macroFiles);
             [macroChannelNums,ind] = sort(macroChannelNums);
             macroFiles = macroFiles(ind);
+            
+            if ischar(obj.experiment)
+                filenameList = {macroFiles.name};
+                regionList = cellfun(@(x)regexp(x,'(?<=\_)(L|R)\w*','match','once'),filenameList,'uniformoutput',0);
+                obj.filenameRegionCorrespondence = [filenameList; regionList; cellfun(@(x)strrep(x,'.mat',''),filenameList,'uniformoutput',0)];
+            else
             thisExp = getExperimentInfo(obj.subject,obj.experiment);
             
             switch macroSystem
@@ -385,6 +393,7 @@ classdef sleepScoring_iEEG < handle
                 
                 obj.filenameRegionCorrespondence = [filenameList; regionList; titleStrings; els2cells(common)'];
             end
+            end
             obj.saveSelf;
         end
 
@@ -405,25 +414,35 @@ classdef sleepScoring_iEEG < handle
             %getFileRegionCorrespondence, but I'm leaving it here for now
             %in case it makes more sense to have it here...
             %
-%             thisExp = getExperimentInfo(obj.subject,obj.experiment);
-%             brainRegions = thisExp.montagePos;
-%             brainRegions(cellfun(@(x)isempty(x),brainRegions)) = [];
-%             macroRawFiles = cellfun(@(x)[arrayfun(@(y)sprintf('%s%d.ncs',x,y),1:8,'uniformoutput',0)],brainRegions,'uniformoutput',0);
-%             macroRawFiles = cat(2,macroRawFiles{:});
-%             
-%             fullNames = arrayfun(@(x)sprintf('%s%d_%s.mat',obj.macroFilePrefix,x,...
-%                 regexp(macroRawFiles{x},'[A-Z]*\d','match','once')),1:length(macroRawFiles),'uniformoutput',0);
-%             simpleNames = arrayfun(@(x)sprintf('%s%d.mat',obj.macroFilePrefix,x),1:length(macroRawFiles),'uniformoutput',0);
-%             alreadyExists = logical(cellfun(@(x)exist(fullfile(obj.linkToConvertedData,x),'file'),fullNames));
-%             alreadyExists_simple = logical(cellfun(@(x)exist(fullfile(obj.linkToConvertedData,x),'file'),simpleNames));
-%             if sum(alreadyExists_simple)>sum(alreadyExists)
-%                 fileNames = simpleNames;
-%             else
-%                 fileNames = fullNames;
-%             end
+            if ischar(obj.experiment)
+                macroRawFiles = dir(fullfile(obj.experiment,'*.ncs'));
+                toKeep = cellfun(@(x)strcmp(x(1),'R')|strcmp(x(1),'L'),{macroRawFiles.name});
+                macroRawFiles = macroRawFiles(toKeep);
+                macroRawFiles = {macroRawFiles.name};
+            else
+                thisExp = getExperimentInfo(obj.subject,obj.experiment);
+                brainRegions = thisExp.montagePos;
+                brainRegions(cellfun(@(x)isempty(x),brainRegions)) = [];
+                macroRawFiles = cellfun(@(x)[arrayfun(@(y)sprintf('%s%d.ncs',x,y),1:8,'uniformoutput',0)],brainRegions,'uniformoutput',0);
+                macroRawFiles = cat(2,macroRawFiles{:});
+            end
+
+            fullNames = arrayfun(@(x)sprintf('%s%d_%s.mat',obj.macroFilePrefix,x,...
+                regexp(macroRawFiles{x},'[A-Z]*\d','match','once')),1:length(macroRawFiles),'uniformoutput',0);
+            simpleNames = arrayfun(@(x)sprintf('%s%d.mat',obj.macroFilePrefix,x),1:length(macroRawFiles),'uniformoutput',0);
+            alreadyExists = logical(cellfun(@(x)exist(fullfile(obj.linkToConvertedData,x),'file'),fullNames));
+            alreadyExists_simple = logical(cellfun(@(x)exist(fullfile(obj.linkToConvertedData,x),'file'),simpleNames));
+            if sum(alreadyExists_simple)>sum(alreadyExists)
+                fileNames = simpleNames;
+            else
+                fileNames = fullNames;
+            end
 %             obj.filenameRegionCorrespondence = [fileNames;fullNames];
             
             % Now unpack macros in each location
+            
+            doPre = ~isempty(obj.preData); doPost = ~isempty(obj.postData);
+%             obj.getFileRegionCorrespondence
             obj = unpackMacros(obj, obj.linkToConvertedData,obj.linkToMacroRawData,fileNames,macroRawFiles);
             if doPre
                 obj = unpackMacros(obj, obj.preData.linkToConverted,obj.preData.linkToMacroRawData,fileNames,macroRawFiles);
@@ -434,7 +453,7 @@ classdef sleepScoring_iEEG < handle
         end
         
         function obj = unpackMacros(obj, linkToConvertedData,linkToMacroRawData,fileNames,rawFileNames)
-            if strcmp(obj.macroPrefix,'MACRO')
+            if strcmp(obj.macroFilePrefix,'MACRO')
             alreadyConverted = logical(cellfun(@(x)exist(fullfile(linkToConvertedData,x),'file'),fileNames));
             fileNames(alreadyConverted) = [];
             rawFileNames(alreadyConverted) = [];
@@ -444,11 +463,11 @@ classdef sleepScoring_iEEG < handle
                 macroRawFiles = dir(fullfile(linkToMacroRawData,'*.ncs'));
                 macroRawFiles = {macroRawFiles.name};
                 suffix = regexp(macroRawFiles{1},'\_\d{4}\.ncs','match','once');
-                if ~isempty(suffix)
-                    macroRawFiles = cellfun(@(x)strrep(x,'.ncs',suffix),rawFileNames,'uniformoutput',0);
-                else
+%                 if ~isempty(suffix)
+%                     macroRawFiles = cellfun(@(x)strrep(x,'.ncs',suffix),rawFileNames,'uniformoutput',0);
+%                 else
                     macroRawFiles = rawFileNames;
-                end
+%                 end
                 rawExists = logical(cellfun(@(x)exist(fullfile(linkToMacroRawData,x),'file'),macroRawFiles));
                 macroRawFiles = macroRawFiles(rawExists);
                 fileNames = fileNames(rawExists);
@@ -488,8 +507,15 @@ classdef sleepScoring_iEEG < handle
                 obj.bestScoringChannelNames = obj.filenameRegionCorrespondence(5,inds);
             else
                 inds = ismember(obj.filenameRegionCorrespondence(5,:),obj.bestScoringChannels);
+                if ~any(inds)
+                    inds = ismember(obj.filenameRegionCorrespondence(2,:),obj.bestScoringChannels);
+                end
                 obj.bestScoringChannelNames = obj.filenameRegionCorrespondence(5,inds);
+                if ~isempty(obj.filenameRegionCorrespondence{4,1})
                 obj.bestScoringChannels = cell2mat(obj.filenameRegionCorrespondence(4,inds));
+                else
+                    obj.bestScoringChannels = find(inds);
+                end
             end
 
             obj.saveSelf;
