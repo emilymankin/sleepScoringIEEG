@@ -10,6 +10,10 @@ end
 colormap(ax,'jet')
 
 % Get Data
+if ~exist(filename,'file')
+    warning('File %s does not exist.');
+    return
+end
 data = load(filename);
 sampInt = data.samplingInterval;
 sampRate = 1/sampInt; % Already stored in kHz

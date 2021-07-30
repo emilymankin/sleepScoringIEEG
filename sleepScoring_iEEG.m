@@ -258,6 +258,17 @@ classdef sleepScoring_iEEG < handle
             obj.filenameRegionCorrespondence = [fileNames;fullNames];
             
             
+             filenameList = fileNames;
+                regionList = cellfun(@(x)arrayfun(@(y)sprintf('%s',x,y),1:8,'uniformoutput',0),brainRegions,'uniformoutput',0); regionList = cat(2,regionList{:});
+                withinRegionChannelList = repmat({arrayfun(@(y)sprintf('%d',y),1:8,'uniformoutput',0)},size(brainRegions)); withinRegionChannelList = cat(2,withinRegionChannelList{:});
+                titleStrings = cellfun(@(fn,r,n)sprintf('%s%d (%s)',r,n,fn),...
+                    cellfun(@(x)strrep(x,'.mat',''),filenameList,'uniformoutput',0),regionList,withinRegionChannelList,'uniformoutput',0);
+                
+                obj.filenameRegionCorrespondence = [filenameList; regionList; titleStrings; els2cells(1:length(regionList))];
+                
+                obj.filenameRegionCorrespondence(6,:) = fullNames;
+            
+            
             % The code block below was elsewhere, and it differs from the
             % block above. Need to debug both to figure out why I did one
             % thing in one place and one in another. 
@@ -469,7 +480,7 @@ classdef sleepScoring_iEEG < handle
                 'ChannelSelection');
             obj.bestScoringChannels = eval(channelsToUse{1});
             
-            if size(obj.filenameRegionCorrespondence,1)<5
+            if size(obj.filenameRegionCorrespondence,1)<5 || isempty(obj.filenameRegionCorrespondence{5,1})
                 obj.filenameRegionCorrespondence(5,:) = cellfun(@(x)regexp(x,'\w*','match','once'),obj.filenameRegionCorrespondence(3,:),'uniformoutput',0);
             end
             if isnumeric(obj.bestScoringChannels),
@@ -1025,7 +1036,7 @@ classdef sleepScoring_iEEG < handle
                 thisAx = ax{ceil(m/24)}{modUp(m,24)};
                 plotHypnogram(fullfile(obj.linkToConvertedData,macroFiles{m}),...
                     thisAx,obj.startTime,obj.endTime);
-                title(thisAx,obj.filenameRegionCorrespondence{3,m},'interpreter','none');
+                title(thisAx,obj.filenameRegionCorrespondence{2,m},'interpreter','none'); % should be third row but it's not defined right now and I just need this to plot
             end
             %%
             if saveFigs
