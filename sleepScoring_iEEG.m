@@ -7,6 +7,7 @@ classdef sleepScoring_iEEG < handle
         experiment;
         linkToMacroRawData;
         macroFilePrefix = 'MACRO';
+        macroSystem = 'Neuralynx';
         linkToConvertedData;
         filenameRegionCorrespondence;
         saveDir;
@@ -211,7 +212,7 @@ classdef sleepScoring_iEEG < handle
                 dateFormat = 'yyyy/mm/dd HH:MM:SS';
                 obj.endTime = datestr(datenum(obj.startTime,dateFormat)+sessionDurationSeconds/24/60/60,dateFormat);
             end
-            obj.getFileRegionCorrespondence;
+            obj.getFileRegionCorrespondence(obj.macroSystem);
             obj.saveSelf;
         end
         
@@ -267,9 +268,9 @@ classdef sleepScoring_iEEG < handle
             
             
              filenameList = fileNames;
-                regionList = cellfun(@(x)arrayfun(@(y)sprintf('%s',x,y),1:8,'uniformoutput',0),brainRegions,'uniformoutput',0); regionList = cat(2,regionList{:});
+                regionList = cellfun(@(x)arrayfun(@(y)sprintf('%s',x),1:8,'uniformoutput',0),brainRegions,'uniformoutput',0); regionList = cat(2,regionList{:});
                 withinRegionChannelList = repmat({arrayfun(@(y)sprintf('%d',y),1:8,'uniformoutput',0)},size(brainRegions)); withinRegionChannelList = cat(2,withinRegionChannelList{:});
-                titleStrings = cellfun(@(fn,r,n)sprintf('%s%d (%s)',r,n,fn),...
+                titleStrings = cellfun(@(fn,r,n)sprintf('%s%s (%s)',r,n,fn),...
                     cellfun(@(x)strrep(x,'.mat',''),filenameList,'uniformoutput',0),regionList,withinRegionChannelList,'uniformoutput',0);
                 
                 obj.filenameRegionCorrespondence = [filenameList; regionList; titleStrings; els2cells(1:length(regionList))];
@@ -388,7 +389,7 @@ classdef sleepScoring_iEEG < handle
                 filenameList = filenameList(common);
                 regionList = regionList(common);
                 withinRegionChannelList = withinRegionChannelList(common);
-                titleStrings = cellfun(@(fn,r,n)sprintf('%s%d (%s)',r,n,fn),...
+                titleStrings = cellfun(@(fn,r,n)sprintf('%s%s (%s)',r,n,fn),...
                     cellfun(@(x)strrep(x,'.mat',''),filenameList,'uniformoutput',0),regionList,withinRegionChannelList,'uniformoutput',0);
                 
                 obj.filenameRegionCorrespondence = [filenameList; regionList; titleStrings; els2cells(common)'];
@@ -397,9 +398,6 @@ classdef sleepScoring_iEEG < handle
             obj.saveSelf;
         end
 
-        
-        
-        
         function obj = unpackMacrosWithPrePost(obj,doPre,doPost)
             % First figure out whether macros have been upnacked in the
             % main folder, and what filenames were used
@@ -495,9 +493,17 @@ classdef sleepScoring_iEEG < handle
                 plotHypnogramsPerChannel(obj,1);
             end
             
+            goodToGo = 0;
+            while ~goodToGo
             channelsToUse = inputdlg('Which channel(s) should be used for sleep scoring? (If more than one, please enter inside brackets)',...
                 'ChannelSelection');
+            try
             obj.bestScoringChannels = eval(channelsToUse{1});
+            goodToGo = 1;
+            catch exception
+                fprintf('The string you entered:\n%s\nwas not able to be evaluated. Please try again.\n')
+            end
+            end
             
             if size(obj.filenameRegionCorrespondence,1)<5 || isempty(obj.filenameRegionCorrespondence{5,1})
                 obj.filenameRegionCorrespondence(5,:) = cellfun(@(x)regexp(x,'\w*','match','once'),obj.filenameRegionCorrespondence(3,:),'uniformoutput',0);
@@ -857,14 +863,19 @@ classdef sleepScoring_iEEG < handle
             xlim([ax{1}],[thisData.T(1),thisData.T(end)])
             
             % collect mean/aggregate data
+            % Note (6/29/2023): All the cat(1...'s in this chunk were
+            % cat(2,...'s before. But it was causing an error. Not sure why
+            % it used to work with dim 2 and now works with dim 1. But if
+            % you run into weird problems again, maybe changing back to 2
+            % will be better for a different dataset.????
             meanP2 = cat(3,{byChannelData.P2});
             meanP1 = mean(cat(3,meanP2{:}),3);
-            meanP_delta = cat(2,{byChannelData.P_delta});
-            meanP_delta = mean(cat(2,meanP_delta{:}),2);
-            anyPointsPassedSleep = cat(2,{byChannelData.pointsPassedSleepThresh});
-            anyPointsPassedSleep = any(cat(2,anyPointsPassedSleep{:}),2);
-            anyPointsPassedREM = cat(2,{byChannelData.pointsPassedREMThresh});
-            anyPointsPassedREM = any(cat(2,anyPointsPassedREM{:}),2);
+            meanP_delta = cat(1,{byChannelData.P_delta});
+            meanP_delta = mean(cat(1,meanP_delta{:}),1);
+            anyPointsPassedSleep = cat(1,{byChannelData.pointsPassedSleepThresh});
+            anyPointsPassedSleep = any(cat(1,anyPointsPassedSleep{:}),1);
+            anyPointsPassedREM = cat(1,{byChannelData.pointsPassedREMThresh});
+            anyPointsPassedREM = any(cat(1,anyPointsPassedREM{:}),1);
             
             % Ask for user input:
             answer = input('Please enter your name\n','s');
@@ -1192,6 +1203,7 @@ classdef sleepScoring_iEEG < handle
             if exist('createNew','var') && createNew
                 obj.saveName = ['sleepScoringObj_',datestr(now,'yyyy_mm_dd-HH_MM')];
             end
+            obj.saveDir = cleanPathForThisSystem(obj.saveDir);
             if ~exist(obj.saveDir,'dir')
                 mkdir(obj.saveDir);
             end
